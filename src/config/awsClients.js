@@ -9,5 +9,6 @@ AWS.config.update({
 });
 
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
+const eventBridge = new AWS.EventBridge();
 
-export default dynamoDB;
+export { dynamoDB, eventBridge };

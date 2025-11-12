@@ -1,4 +1,4 @@
-import dynamoDB from "../config/dynamoClient.js";
+import { dynamoDB, eventBridge } from "../config/awsClients.js";
 import { v4 as uuidv4 } from "uuid";
 
 export default class EventController {
@@ -13,6 +13,7 @@ export default class EventController {
 
       const eventId = uuidv4();
       console.log("Creating event with ID:", eventId);
+      // 1️⃣ Insert the event into DynamoDB
       const params = {
         TableName: process.env.EVENTS_TABLE_NAME,
         Item: {
@@ -21,11 +22,40 @@ export default class EventController {
           description,
           type,
           dateTime,
-          createdAt: new Date().toISOString(),
+          status: "Scheduled",
+          createdAt: new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
         },
       };
 
       await dynamoDB.put(params).promise();
+
+      // // Schedule Lambda trigger 30 mins before event start
+      // const eventTime = new Date(dateTime);
+      // const triggerTime = new Date(eventTime.getTime() - 30 * 60 * 1000);
+
+      // // 2️⃣ Create an EventBridge rule for scheduled trigger
+      // const ruleName = `EventTrigger_${eventId}`;
+      // const cronExp = `${triggerTime.getUTCMinutes()} ${triggerTime.getUTCHours()} ${triggerTime.getUTCDate()} ${triggerTime.getUTCMonth() + 1} ? ${triggerTime.getUTCFullYear()}`;
+
+      // await eventBridge.putRule({
+      //   Name: ruleName,
+      //   ScheduleExpression: `cron(${cronExp})`,
+      //   State: "ENABLED",
+      // }).promise();
+
+      // // 3️⃣ Add your Lambda as target
+      // await eventBridge.putTargets({
+      //   Rule: ruleName,
+      //   Targets: [
+      //     {
+      //       Id: `Target_${eventId}`,
+      //       Arn: process.env.LIVE_STREAM_LAMBDA_ARN,
+      //       Input: JSON.stringify({ eventId }),
+      //     },
+      //   ],
+      // }).promise();
+
+      // console.log(`✅ Scheduled Lambda for ${ruleName}`);
 
       return res.status(201).json({
         success: true,
@@ -65,7 +95,7 @@ export default class EventController {
     }
   }
 
-   // ✅ Update event
+  // ✅ Update event
   static async updateEvent(req, res) {
     try {
       const { eventId } = req.params;
