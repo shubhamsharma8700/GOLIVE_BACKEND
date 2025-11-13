@@ -27,7 +27,7 @@ const router = express.Router();
  *               type:
  *                 type: string
  *                 example: paid
- *               dateTime:
+ *               startTime:
  *                 type: string
  *                 example: 2025-11-10T10:00:00Z
  *               amount:
@@ -81,7 +81,7 @@ router.get("/list", adminMiddleware, EventController.listEvents);
  *                 type: string
  *               type:
  *                 type: string
- *               dateTime:
+ *               startTime:
  *                 type: string
  *     responses:
  *       200:

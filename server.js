@@ -14,9 +14,14 @@ const swaggerOptions = {
       description: "API documentation for admin login and event management",
     },
     servers: [
-      {
+       {
         url: "http://localhost:5000",
+        description: "Local server",
       },
+      {
+         url: "https://d2wmdj5cojtj0q.cloudfront.net/app",
+         description: "Production server",
+      }
     ],
   },
   apis: ["./src/routes/*.js"], // ✅ correct path for your folder structure

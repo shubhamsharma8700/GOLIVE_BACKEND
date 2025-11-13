@@ -5,9 +5,9 @@ export default class EventController {
   // Create a new event
   static async createEvent(req, res) {
     try {
-      const { title, description, type, dateTime } = req.body;
+      const { title, description, type, startTime } = req.body;
 
-      if (!title || !description || !type || !dateTime) {
+      if (!title || !description || !type || !startTime) {
         return res.status(400).json({ message: "Missing required fields" });
       }
 
@@ -21,7 +21,7 @@ export default class EventController {
           title,
           description,
           type,
-          dateTime,
+          startTime,
           status: "Scheduled",
           createdAt: new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
         },
@@ -30,7 +30,7 @@ export default class EventController {
       await dynamoDB.put(params).promise();
 
       // // Schedule Lambda trigger 30 mins before event start
-      // const eventTime = new Date(dateTime);
+      // const eventTime = new Date(startTime);
       // const triggerTime = new Date(eventTime.getTime() - 30 * 60 * 1000);
 
       // // 2️⃣ Create an EventBridge rule for scheduled trigger
@@ -99,13 +99,13 @@ export default class EventController {
   static async updateEvent(req, res) {
     try {
       const { eventId } = req.params;
-      const { title, description, type, dateTime, amount } = req.body;
+      const { title, description, type, startTime, amount } = req.body;
 
       if (!eventId) {
         return res.status(400).json({ message: "Missing eventId" });
       }
 
-      if (!title || !description || !type || !dateTime) {
+      if (!title || !description || !type || !startTime) {
         return res.status(400).json({ message: "Missing required fields" });
       }
 
@@ -128,7 +128,7 @@ export default class EventController {
           title,
           description,
           type,
-          dateTime,
+          startTime,
           amount: amount || 0,
           updatedAt: new Date().toISOString(),
         },
