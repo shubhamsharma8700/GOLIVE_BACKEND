@@ -21,7 +21,12 @@ const swaggerOptions = {
       {
          url: "https://d2wmdj5cojtj0q.cloudfront.net/app",
          description: "Production server",
+      },
+      {
+         url: "https://13.234.235.130:5000",
+         description: "EC2 server",
       }
+
     ],
   },
   apis: ["./src/routes/*.js"], // ✅ correct path for your folder structure
