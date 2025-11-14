@@ -2,7 +2,9 @@ import {
   MediaLiveClient,
   CreateInputCommand,
   CreateChannelCommand as CreateMLChannelCommand,
-  CreateInputSecurityGroupCommand
+  CreateInputSecurityGroupCommand,
+  StartChannelCommand,
+  DescribeChannelCommand
 } from "@aws-sdk/client-medialive";
 import {
   MediaPackageClient,
@@ -30,20 +32,22 @@ const mediapackage = new MediaPackageClient({
 });
 const cloudfront = new CloudFrontClient({ 
   maxAttempts: 3,
-  requestTimeout: 60000 // CloudFront takes longer
+  requestTimeout: 60000
 });
 const dynamodb = new DynamoDBClient({ 
   maxAttempts: 3,
   requestTimeout: 10000 
 });
 
+// Response Headers Policy ID
+const RESPONSE_HEADERS_POLICY_ID = "df87bddf-02e3-4626-8bbd-0a64b5888f85";
+
 export const handler = async (event, context) => {
-  // Set remaining time buffer (exit 10 seconds before timeout)
   const timeoutBuffer = 10000;
   const startTime = Date.now();
   const maxExecutionTime = context.getRemainingTimeInMillis ? 
     context.getRemainingTimeInMillis() - timeoutBuffer : 
-    290000; // Default to 290 seconds (leave 10s buffer from 300s max)
+    290000;
 
   const checkTimeout = () => {
     const elapsed = Date.now() - startTime;
@@ -71,7 +75,7 @@ export const handler = async (event, context) => {
 
     const title = Item.title?.S || "Untitled Event";
 
-    // 2️⃣ Create MediaPackage channel
+    // 2️⃣ Create MediaPackage channel with CORS enabled
     checkTimeout();
     console.log("Creating MediaPackage channel...");
     const mpChannelResponse = await mediapackage.send(
@@ -82,7 +86,7 @@ export const handler = async (event, context) => {
     );
     console.log("✅ MediaPackage channel created");
 
-    // 3️⃣ & 3.5️⃣ Create MediaPackage endpoint and Security Group in parallel
+    // 3️⃣ & 3.5️⃣ Create MediaPackage endpoint with CORS and Security Group in parallel
     checkTimeout();
     console.log("Creating MediaPackage endpoint and Security Group...");
     const [mpEndpointResponse, sgResponse] = await Promise.all([
@@ -97,6 +101,8 @@ export const handler = async (event, context) => {
             SegmentDurationSeconds: 6,
             PlaylistWindowSeconds: 60,
           },
+          // Enable CORS on MediaPackage endpoint
+          Origination: "ALLOW",
         })
       ),
       medialive.send(
@@ -244,7 +250,50 @@ export const handler = async (event, context) => {
     );
     console.log("✅ MediaLive channel created");
 
-    // 6️⃣ Create CloudFront distribution (this is slow - skip if timing out)
+    // 5.5️⃣ Wait for channel to be in IDLE state, then start it
+    checkTimeout();
+    console.log("Waiting for MediaLive channel to be ready to start...");
+    
+    const channelId = mlChannelResponse.Channel.Id;
+    const maxWaitTime = 120000; // 2 minutes max wait
+    const pollInterval = 5000; // Check every 5 seconds
+    const waitStartTime = Date.now();
+    
+    let channelState = "CREATING";
+    while (channelState !== "IDLE" && (Date.now() - waitStartTime) < maxWaitTime) {
+      checkTimeout();
+      
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      
+      const describeResponse = await medialive.send(
+        new DescribeChannelCommand({ ChannelId: channelId })
+      );
+      
+      channelState = describeResponse.State;
+      console.log(`Channel state: ${channelState}`);
+      
+      if (channelState === "IDLE") {
+        break;
+      }
+      
+      if (channelState === "CREATE_FAILED") {
+        throw new Error("MediaLive channel creation failed");
+      }
+    }
+    
+    if (channelState !== "IDLE") {
+      console.warn(`⚠️ Channel did not reach IDLE state within timeout. Current state: ${channelState}`);
+      console.log("Proceeding without starting the channel. You may need to start it manually.");
+    } else {
+      // Start the channel
+      console.log("Starting MediaLive channel...");
+      await medialive.send(
+        new StartChannelCommand({ ChannelId: channelId })
+      );
+      console.log("✅ MediaLive channel started successfully");
+    }
+
+    // 6️⃣ Create CloudFront distribution with proper CORS and caching settings
     checkTimeout();
     console.log("Creating CloudFront distribution...");
     
@@ -259,7 +308,7 @@ export const handler = async (event, context) => {
             Quantity: 1,
             Items: [
               {
-                Id: "Origin1",
+                Id: "MediaPackageOrigin",
                 DomainName: domain,
                 CustomOriginConfig: {
                   HTTPPort: 80,
@@ -269,39 +318,136 @@ export const handler = async (event, context) => {
                     Quantity: 1,
                     Items: ["TLSv1.2"],
                   },
+                  OriginReadTimeout: 30,
+                  OriginKeepaliveTimeout: 5,
+                },
+                // Custom headers to forward to origin
+                CustomHeaders: {
+                  Quantity: 0,
                 },
               },
             ],
           },
           DefaultCacheBehavior: {
-            TargetOriginId: "Origin1",
+            TargetOriginId: "MediaPackageOrigin",
             ViewerProtocolPolicy: "redirect-to-https",
             AllowedMethods: {
-              Quantity: 2,
-              Items: ["GET", "HEAD"],
+              Quantity: 3,
+              Items: ["GET", "HEAD", "OPTIONS"],
               CachedMethods: {
                 Quantity: 2,
                 Items: ["GET", "HEAD"],
               },
             },
+            // Compress content for better performance
+            Compress: true,
+            // Forward necessary headers for CORS and HLS
             ForwardedValues: {
-              QueryString: false,
+              QueryString: true,
               Cookies: {
                 Forward: "none",
+              },
+              Headers: {
+                Quantity: 4,
+                Items: [
+                  "Origin",
+                  "Access-Control-Request-Method",
+                  "Access-Control-Request-Headers",
+                  "Range"
+                ],
               },
             },
             TrustedSigners: {
               Enabled: false,
               Quantity: 0,
             },
+            // Optimized TTL for live streaming
             MinTTL: 0,
+            DefaultTTL: 5,      // 5 seconds for segments
+            MaxTTL: 10,         // Max 10 seconds
+            SmoothStreaming: false,
+            // Add Response Headers Policy
+            ResponseHeadersPolicyId: RESPONSE_HEADERS_POLICY_ID,
           },
+          // Cache behaviors for different content types
+          CacheBehaviors: {
+            Quantity: 2,
+            Items: [
+              // Manifest files (.m3u8) - shorter cache
+              {
+                PathPattern: "*.m3u8",
+                TargetOriginId: "MediaPackageOrigin",
+                ViewerProtocolPolicy: "redirect-to-https",
+                AllowedMethods: {
+                  Quantity: 3,
+                  Items: ["GET", "HEAD", "OPTIONS"],
+                  CachedMethods: {
+                    Quantity: 2,
+                    Items: ["GET", "HEAD"],
+                  },
+                },
+                Compress: true,
+                ForwardedValues: {
+                  QueryString: true,
+                  Cookies: { Forward: "none" },
+                  Headers: {
+                    Quantity: 4,
+                    Items: ["Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers", "Range"],
+                  },
+                },
+                MinTTL: 0,
+                DefaultTTL: 2,
+                MaxTTL: 5,
+                TrustedSigners: { Enabled: false, Quantity: 0 },
+                // Add Response Headers Policy
+                ResponseHeadersPolicyId: RESPONSE_HEADERS_POLICY_ID,
+              },
+              // Video segments (.ts) - can cache longer
+              {
+                PathPattern: "*.ts",
+                TargetOriginId: "MediaPackageOrigin",
+                ViewerProtocolPolicy: "redirect-to-https",
+                AllowedMethods: {
+                  Quantity: 3,
+                  Items: ["GET", "HEAD", "OPTIONS"],
+                  CachedMethods: {
+                    Quantity: 2,
+                    Items: ["GET", "HEAD"],
+                  },
+                },
+                Compress: false, // Don't compress video segments
+                ForwardedValues: {
+                  QueryString: true,
+                  Cookies: { Forward: "none" },
+                  Headers: {
+                    Quantity: 4,
+                    Items: ["Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers", "Range"],
+                  },
+                },
+                MinTTL: 0,
+                DefaultTTL: 60,
+                MaxTTL: 86400,
+                TrustedSigners: { Enabled: false, Quantity: 0 },
+                // Add Response Headers Policy
+                ResponseHeadersPolicyId: RESPONSE_HEADERS_POLICY_ID,
+              },
+            ],
+          },
+          // Custom error responses (optional - removed to avoid configuration issues)
+          CustomErrorResponses: {
+            Quantity: 0,
+          },
+          Comment: `Live streaming distribution for ${title} with CORS support`,
+          PriceClass: "PriceClass_All",
+          HttpVersion: "http2",
         },
       })
     );
     console.log("✅ CloudFront distribution created");
-
-    const cloudFrontUrl = `https://${cfDistResponse.Distribution.DomainName}/out/v1/${mpEndpointResponse.Id}/index.m3u8`;
+    const mpDomain=mpEndpointResponse.Url
+    const pathOnly = new URL(mpDomain).pathname.substring(1);
+    // const cloudFrontUrl = `https://${cfDistResponse.Distribution.DomainName}/out/v1/${mpEndpointResponse.Id}/index.m3u8`;
+    const cloudFrontUrl = `https://${cfDistResponse.Distribution.DomainName}/${pathOnly}`;
 
     // 7️⃣ Update DynamoDB with stream details
     checkTimeout();
@@ -310,7 +456,7 @@ export const handler = async (event, context) => {
         TableName,
         Key: { eventId: { S: eventId } },
         UpdateExpression:
-          "set rtmpInputUrl = :rtmp, mediaPackageUrl = :mp, cloudFrontUrl = :cf, #st = :status",
+          "set rtmpInputUrl = :rtmp, mediaPackageUrl = :mp, cloudFrontUrl = :cf, #st = :status, cloudFrontDomain = :domain, channelState = :channelState,channelId = :channelId",
         ExpressionAttributeNames: {
           "#st": "status",
         },
@@ -318,7 +464,10 @@ export const handler = async (event, context) => {
           ":rtmp": { S: inputResponse.Input.Destinations[0].Url },
           ":mp": { S: mpEndpointResponse.Url },
           ":cf": { S: cloudFrontUrl },
-          ":status": { S: "Ready for Live" },
+          ":status": { S: channelState === "IDLE" || channelState === "STARTING" || channelState === "RUNNING" ? "Ready for Live" : "Channel Not Started" },
+          ":domain": { S: cfDistResponse.Distribution.DomainName },
+          ":channelState": { S: channelState },
+          ":channelId": { S: channelId },
         },
       })
     );
@@ -329,6 +478,10 @@ export const handler = async (event, context) => {
       rtmpInputUrl: inputResponse.Input.Destinations[0].Url,
       mediaPackageUrl: mpEndpointResponse.Url,
       cloudFrontUrl,
+      cloudFrontDomain: cfDistResponse.Distribution.DomainName,
+      channelState,
+      channelStarted: channelState === "STARTING" || channelState === "RUNNING",
+      note: `CloudFront distribution may take 15-20 minutes to fully deploy. CORS is configured for video.js playback from any origin including localhost. ${channelState === "IDLE" || channelState === "STARTING" || channelState === "RUNNING" ? "MediaLive channel has been started automatically." : "MediaLive channel needs to be started manually from AWS Console."}`
     };
 
   } catch (error) {

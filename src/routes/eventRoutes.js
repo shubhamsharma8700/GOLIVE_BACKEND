@@ -177,5 +177,66 @@ router.delete("/delete/:eventId", adminMiddleware, EventController.deleteEvent);
  */
 router.get("/event/:eventId", adminMiddleware, EventController.getEventById);
 
+/**
+ * @swagger
+ * /api/admin/event/channel/start:
+ *   post:
+ *     summary: Start an AWS MediaLive channel
+ *     description: Initiates the start process for a MediaLive channel.
+ *     tags: [Events]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - channelId
+ *             properties:
+ *               channelId:
+ *                 type: string
+ *                 example: "1234567"
+ *     responses:
+ *       200:
+ *         description: Channel start initiated
+ *       400:
+ *         description: Missing required fields
+ *       500:
+ *         description: Server error
+ */
+router.post("/channel/start", adminMiddleware, EventController.startChannel);
+
+
+/**
+ * @swagger
+ * /api/admin/event/channel/stop:
+ *   post:
+ *     summary: Stop an AWS MediaLive channel
+ *     description: Initiates the stop process for a MediaLive channel.
+ *     tags: [Events]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - channelId
+ *             properties:
+ *               channelId:
+ *                 type: string
+ *                 example: "1234567"
+ *     responses:
+ *       200:
+ *         description: Channel stop initiated
+ *       400:
+ *         description: Missing required fields
+ *       500:
+ *         description: Server error
+ */
+router.post("/channel/stop", adminMiddleware, EventController.stopChannel);
+
+
+
 
 export default router;

@@ -10,5 +10,6 @@ AWS.config.update({
 
 const dynamoDB = new AWS.DynamoDB.DocumentClient();
 const eventBridge = new AWS.EventBridge();
+const medialive = new AWS.MediaLive(); 
 
-export { dynamoDB, eventBridge };
+export { dynamoDB, eventBridge ,medialive };

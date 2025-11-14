@@ -1,4 +1,4 @@
-import { dynamoDB, eventBridge } from "../config/awsClients.js";
+import { dynamoDB, eventBridge ,medialive } from "../config/awsClients.js";
 import { v4 as uuidv4 } from "uuid";
 
 export default class EventController {
@@ -219,6 +219,67 @@ export default class EventController {
         success: false,
         message: "Unable to fetch event details",
       });
+    }
+  }
+
+   // START MEDIALIVE CHANNEL
+  static async startChannel(req, res) {
+    try {
+      const { channelId } = req.body;
+
+      if (!channelId) {
+        return res.status(400).json({ message: "channelId is required" });
+      }
+
+      // Optional: check channel details
+      const details = await medialive.describeChannel({ ChannelId: channelId }).promise();
+      if (details.State === "RUNNING") {
+        return res.json({ message: "Channel already running" });
+      }
+
+      const response = await medialive.startChannel({
+        ChannelId: channelId
+      }).promise();
+
+      return res.status(200).json({
+        success: true,
+        message: "Channel start initiated",
+        response
+      });
+
+    } catch (error) {
+      console.error("Start Channel Error:", error);
+      return res.status(500).json({ message: error.message });
+    }
+  }
+
+  // STOP MEDIALIVE CHANNEL
+  static async stopChannel(req, res) {
+    try {
+      const { channelId } = req.body;
+
+      if (!channelId) {
+        return res.status(400).json({ message: "channelId is required" });
+      }
+
+      const details = await medialive.describeChannel({ ChannelId: channelId }).promise();
+      if (details.State === "IDLE") {
+        return res.json({ message: "Channel already stopped" });
+      }
+
+      const response = await medialive.stopChannel({
+        ChannelId: channelId
+      }).promise();
+
+      return res.status(200).json({
+        success: true,
+        message: "Channel stop initiated",
+        response
+      });
+
+    } catch (error) {
+      console.error("Stop Channel Error:", error);
+      return res.status(500).json({ message: error.message });
     }
   }
 }
