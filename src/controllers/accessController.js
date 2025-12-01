@@ -1,7 +1,8 @@
-import { dynamoDB, lambda } from "../config/awsClients.js";
+import { dynamoDB } from "../config/awsClients.js";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
 import { signViewerToken } from "../utils/jwt.js";
+import { sendPasswordFromServer } from "../utils/sendPasswordFromServer.js";
 
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 const VIEWERS_TABLE = process.env.VIWERS_TABLE_NAME || process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
@@ -130,31 +131,20 @@ export default class AccessController {
           const storedPassword = event.accessPassword || event.password;
           if (!storedPassword) return res.status(500).json({ message: "Event password not configured" });
 
-          // Fire-and-forget invoke of the sendPassword Lambda to email the password
+          // Send the password email directly via SES from the server
           try {
-            const lambdaPayload = {
+            await sendPasswordFromServer({
               eventId,
               clientViewerId,
               email,
-              formData: {
-                firstName,
-                lastName,
-                email,
-              },
-            };
-
-            console.log("[requestAccess] invoking sendPassword Lambda with:", lambdaPayload);
-
-            await lambda
-              .invoke({
-                FunctionName: process.env.SEND_PASSWORD_LAMBDA || "sendPassword",
-                InvocationType: "Event", // async, do not wait for email to finish
-                Payload: JSON.stringify(lambdaPayload),
-              })
-              .promise();
+              firstName,
+              lastName,
+              password: storedPassword,
+              eventTitle: event.title || eventId,
+            });
           } catch (err) {
-            console.error("[requestAccess] ERROR invoking sendPassword Lambda:", err);
-            // Do not block registration on email failure; Lambda errors can be inspected in CloudWatch
+            console.error("[requestAccess] ERROR sending password email from server:", err);
+            // Do not block registration on email failure
           }
 
           accessGranted = false;
