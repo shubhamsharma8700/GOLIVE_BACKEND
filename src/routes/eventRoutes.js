@@ -16,7 +16,6 @@ const router = express.Router();
  * /api/admin/event/create:
  *   post:
  *     summary: Create a new event
- *     description: Adds a new event record to DynamoDB
  *     tags: [Events]
  *     requestBody:
  *       required: true
@@ -28,7 +27,10 @@ const router = express.Router();
  *               - title
  *               - description
  *               - startTime
+ *               - eventType
  *               - accessMode
+ *               - status
+ *               - createdBy
  *             properties:
  *               title:
  *                 type: string
@@ -42,21 +44,37 @@ const router = express.Router();
  *               endTime:
  *                 type: string
  *                 example: 2025-11-10T12:00:00Z
+ *               eventType:
+ *                 type: string
+ *                 enum: [live, vod]
+ *               status:
+ *                 type: string
+ *                 enum: [scheduled, live, vod, ended]
  *               accessMode:
  *                 type: string
- *                 enum: [free, password, payment]
- *                 example: password
- *               password:
+ *                 enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
+ *                 description: Access control type
+ *               createdBy:
  *                 type: string
- *                 example: abc123
+ *                 description: Admin ID
+ *               accessPassword:
+ *                 type: string
+ *                 description: Required if accessMode = passwordAccess
+ *               formFields:
+ *                 type: object
+ *                 description: Form schema for emailAccess (optional, e.g. firstName, lastName, email + custom fields)
  *               paymentAmount:
  *                 type: number
- *                 example: 200
+ *                 description: Required if accessMode = paidAccess
+ *               currency:
+ *                 type: string
+ *                 example: USD
+ *                 description: Required if accessMode = paidAccess
  *     responses:
  *       201:
- *         description: Event created successfully
+ *         description: Event created
  *       400:
- *         description: Missing required fields
+ *         description: Invalid input
  */
 router.post("/create", adminMiddleware, EventController.createEvent);
 
@@ -95,11 +113,6 @@ router.get("/list", adminMiddleware, EventController.listEvents);
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - title
- *               - description
- *               - startTime
- *               - accessMode
  *             properties:
  *               title:
  *                 type: string
@@ -113,16 +126,44 @@ router.get("/list", adminMiddleware, EventController.listEvents);
  *               endTime:
  *                 type: string
  *                 example: 2025-11-10T12:00:00Z
+ *               eventType:
+ *                 type: string
+ *                 enum: [live, vod]
+ *               createdBy:
+ *                 type: string
+ *                 description: Admin ID if changing ownership
+ *               thumbnailUrl:
+ *                 type: string
+ *                 example: https://example.com/thumbnail.png
+ *               mediaLiveChannelId:
+ *                 type: string
+ *               mediaPackageChannelId:
+ *                 type: string
+ *               liveUrl:
+ *                 type: string
+ *               vodUrl:
+ *                 type: string
+ *               s3Bucket:
+ *                 type: string
  *               accessMode:
  *                 type: string
- *                 enum: [free, password, payment]
- *                 example: payment
- *               password:
+ *                 enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
+ *                 description: Change the event gate type
+ *               accessPassword:
  *                 type: string
- *                 example: mypass123
+ *                 description: Required if accessMode = passwordAccess
+ *               formFields:
+ *                 type: object
+ *                 description: Form schema for emailAccess (optional)
  *               paymentAmount:
  *                 type: number
- *                 example: 300
+ *                 description: Required if accessMode = paidAccess
+ *               currency:
+ *                 type: string
+ *                 description: Required if accessMode = paidAccess
+ *               status:
+ *                 type: string
+ *                 enum: [scheduled, live, vod, ended]
  *     responses:
  *       200:
  *         description: Event updated successfully
