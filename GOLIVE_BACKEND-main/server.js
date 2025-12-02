@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 import app from "./src/app.js";
-import adminRoutes from "./src/routes/admin.js";
+import adminRoutes from "./src/routes/adminRoutes.js";
 
 
 dotenv.config();
@@ -14,6 +14,16 @@ const swaggerOptions = {
       title: "Admin Event API",
       version: "1.0.0",
       description: "API documentation for admin login and event management",
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description: "Enter JWT token as: Bearer <token>"
+        }
+      }
     },
     servers: [
        {
@@ -36,7 +46,18 @@ const swaggerOptions = {
 
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+// Provide options to enable the Authorize button and explorer in Swagger UI
+const swaggerUiOptions = {
+  explorer: true,
+};
+
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocs, swaggerUiOptions));
+
+// Expose Swagger docs as JSON (useful for debugging or advanced UI config)
+app.get("/api-docs-json", (req, res) => {
+  res.json(swaggerDocs);
+});
 
 
 // ADMIN ROUTES FROM service.js
