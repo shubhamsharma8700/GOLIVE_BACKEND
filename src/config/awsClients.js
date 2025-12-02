@@ -29,4 +29,41 @@ try {
   console.error("[AWS] Failed to initialize STS for caller identity:", err);
 }
 
-export { dynamoDB, eventBridge, medialive, lambda };
+// AWS SDK v3 DynamoDB Setup
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DeleteCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  ScanCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+
+const REGION = process.env.AWS_REGION || "ap-south-1";
+const ddbClient = new DynamoDBClient({ region: REGION });
+
+const marshallOptions = { removeUndefinedValues: true };
+
+const unmarshallOptions = {};
+
+const ddbDocClient = DynamoDBDocumentClient.from(ddbClient, {
+  marshallOptions,
+  unmarshallOptions,
+});
+
+const TABLE = process.env.DYNAMODB_TABLE;
+console.log("TABLE inside dynamo.js:", TABLE);
+
+export {
+  // SDK v3
+  ddbDocClient,
+  DeleteCommand,
+  // SDK v2
+  dynamoDB,
+  eventBridge, GetCommand, lambda, medialive, PutCommand,
+  QueryCommand,
+  ScanCommand, TABLE, UpdateCommand
+};
+
