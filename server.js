@@ -1,7 +1,9 @@
-import app from "./src/app.js";
 import dotenv from "dotenv";
-import swaggerUi from "swagger-ui-express";
 import swaggerJsdoc from "swagger-jsdoc";
+import swaggerUi from "swagger-ui-express";
+import app from "./src/app.js";
+import adminRoutes from "./src/routes/adminRoutes.js";
+
 
 dotenv.config();
 
@@ -12,6 +14,16 @@ const swaggerOptions = {
       title: "Admin Event API",
       version: "1.0.0",
       description: "API documentation for admin login and event management",
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description: "Enter JWT token as: Bearer <token>"
+        }
+      }
     },
     servers: [
        {
@@ -29,18 +41,45 @@ const swaggerOptions = {
 
     ],
   },
-  apis: ["./src/routes/*.js"], // ✅ correct path for your folder structure
+  apis: ["./src/routes/*.js"],
 };
 
 
 const swaggerDocs = swaggerJsdoc(swaggerOptions);
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
-app.get('/health', (req, res) => res.status(200).send('OK'));
+// Provide options to enable the Authorize button and explorer in Swagger UI
+const swaggerUiOptions = {
+  explorer: true,
+};
 
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocs, swaggerUiOptions));
+
+// Expose Swagger docs as JSON (useful for debugging or advanced UI config)
+app.get("/api-docs-json", (req, res) => {
+  res.json(swaggerDocs);
+});
+
+
+// ADMIN ROUTES FROM service.js
+
+app.use("/api/admins", adminRoutes);
+
+// GLOBAL ERROR HANDLER from service.js
+
+app.use((err, req, res, next) => {
+  console.error("🔥 ERROR:", err);
+  res
+    .status(err.status || 500)
+    .json({ error: err.message || "Internal Server Error" });
+});
+
+// HEALTH CHECK
+
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
+// SERVER START
 
 const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server running on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
