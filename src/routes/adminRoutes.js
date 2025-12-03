@@ -2,7 +2,7 @@ import express from "express";
 
 import {
     deleteAdmin,
-    listAdmins,
+    listAdmin,
     login,
     registerAdmin,
     requestPasswordReset,
@@ -17,7 +17,7 @@ const router = express.Router();
 /**
  * @swagger
  * tags:
- *   name: Admins
+ *   name: Admin
  *   description: Admin management and authentication
  *
  * components:
@@ -67,10 +67,10 @@ const router = express.Router();
 // Public Routes
 /**
  * @swagger
- * /api/admins/register:
+ * /api/admin/register:
  *   post:
  *     summary: Register a new admin
- *     tags: [Admins]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -87,10 +87,10 @@ router.post("/register", registerAdmin);
 
 /**
  * @swagger
- * /api/admins/login:
+ * /api/admin/login:
  *   post:
  *     summary: Login as admin
- *     tags: [Admins]
+ *     tags: [admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -107,10 +107,10 @@ router.post("/login", login);
 
 /**
  * @swagger
- * /api/admins/forgot-password/request-otp:
+ * /api/admin/forgot-password/request-otp:
  *   post:
  *     summary: Request OTP for password reset
- *     tags: [Admins]
+ *     tags: [admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -133,10 +133,10 @@ router.post("/forgot-password/request-otp", requestPasswordReset);
 
 /**
  * @swagger
- * /api/admins/forgot-password/verify-reset:
+ * /api/admin/forgot-password/verify-reset:
  *   post:
  *     summary: Verify OTP and reset password
- *     tags: [Admins]
+ *     tags: [admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -166,15 +166,15 @@ router.post("/forgot-password/verify-reset", verifyOtpAndReset);
 // Protected Routes
 /**
  * @swagger
- * /api/admins:
+ * /api/admin:
  *   get:
- *     summary: List all admins
- *     tags: [Admins]
+ *     summary: List all admin
+ *     tags: [admin]
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: List of admins
+ *         description: List of admin
  *         content:
  *           application/json:
  *             schema:
@@ -182,14 +182,14 @@ router.post("/forgot-password/verify-reset", verifyOtpAndReset);
  *               items:
  *                 $ref: '#/components/schemas/Admin'
  */
-router.get("/", requireAuth, listAdmins);
+router.get("/", requireAuth, listAdmin);
 
 /**
  * @swagger
- * /api/admins/{adminID}:
+ * /api/admin/{adminID}:
  *   put:
  *     summary: Update an admin by ID
- *     tags: [Admins]
+ *     tags: [admin]
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -221,10 +221,10 @@ router.put("/:adminID", requireAuth, updateAdmin);
 
 /**
  * @swagger
- * /api/admins/{adminID}:
+ * /api/admin/{adminID}:
  *   delete:
  *     summary: Delete an admin by ID
- *     tags: [Admins]
+ *     tags: [admin]
  *     security:
  *       - bearerAuth: []
  *     parameters:
