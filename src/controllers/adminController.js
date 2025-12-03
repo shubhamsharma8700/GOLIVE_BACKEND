@@ -131,7 +131,7 @@ export async function login(req, res, next) {
 }
 
 // LIST
-export async function listAdmins(req, res, next) {
+export async function listAdmin(req, res, next) {
   try {
     const result = await ddbDocClient.send(new ScanCommand({ TableName: TABLE }));
     const safe = result.Items.map(({ passwordHash, passwordResetOTP, passwordResetOtpExpiry, ...rest }) => rest);

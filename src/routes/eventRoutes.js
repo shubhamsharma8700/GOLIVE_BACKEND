@@ -1,6 +1,5 @@
 import express from "express";
 import EventController from "../controllers/eventController.js";
-import { adminMiddleware } from "../middleware/adminMiddleware.js";
 
 const router = express.Router();
 
@@ -76,7 +75,7 @@ const router = express.Router();
  *       400:
  *         description: Invalid input
  */
-router.post("/create", adminMiddleware, EventController.createEvent);
+router.post("/create", EventController.createEvent);
 
 
 /**
@@ -90,7 +89,7 @@ router.post("/create", adminMiddleware, EventController.createEvent);
  *       200:
  *         description: List of events retrieved successfully
  */
-router.get("/list", adminMiddleware, EventController.listEvents);
+router.get("/list", EventController.listEvents);
 
 
 /**
@@ -170,7 +169,7 @@ router.get("/list", adminMiddleware, EventController.listEvents);
  *       404:
  *         description: Event not found
  */
-router.put("/update/:eventId", adminMiddleware, EventController.updateEvent);
+router.put("/update/:eventId", EventController.updateEvent);
 
 
 /**
@@ -193,7 +192,7 @@ router.put("/update/:eventId", adminMiddleware, EventController.updateEvent);
  *       404:
  *         description: Event not found
  */
-router.delete("/delete/:eventId", adminMiddleware, EventController.deleteEvent);
+router.delete("/delete/:eventId", EventController.deleteEvent);
 
 
 /**
@@ -216,7 +215,7 @@ router.delete("/delete/:eventId", adminMiddleware, EventController.deleteEvent);
  *       404:
  *         description: Event not found
  */
-router.get("/event/:eventId", adminMiddleware, EventController.getEventById);
+router.get("/event/:eventId", EventController.getEventById);
 
 /**
  * @swagger
@@ -245,7 +244,7 @@ router.get("/event/:eventId", adminMiddleware, EventController.getEventById);
  *       500:
  *         description: Server error
  */
-router.post("/channel/start", adminMiddleware, EventController.startChannel);
+router.post("/channel/start", EventController.startChannel);
 
 
 /**
@@ -275,7 +274,7 @@ router.post("/channel/start", adminMiddleware, EventController.startChannel);
  *       500:
  *         description: Server error
  */
-router.post("/channel/stop", adminMiddleware, EventController.stopChannel);
+router.post("/channel/stop", EventController.stopChannel);
 
 
 
