@@ -3,17 +3,24 @@ import jwt from "jsonwebtoken";
 const JWT_SECRET = process.env.JWT_SECRET;
 
 export function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Unauthorized" });
+  if (!JWT_SECRET) {
+    console.error("JWT_SECRET is missing from environment variables.");
+    return res.status(500).json({ error: "Server misconfiguration" });
   }
 
-  const token = authHeader.split(" ")[1];
+  // Check Authorization header or cookie
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.split(" ")[1]
+    : req.cookies?.token;
+
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized: No token provided" });
+  }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // attach user info to request
+    req.user = decoded; // attach user payload
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });

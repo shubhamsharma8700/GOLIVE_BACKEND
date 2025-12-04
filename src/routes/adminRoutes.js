@@ -1,13 +1,14 @@
 import express from "express";
 
 import {
-    deleteAdmin,
-    listAdmin,
-    login,
-    registerAdmin,
-    requestPasswordReset,
-    updateAdmin,
-    verifyOtpAndReset
+  registerAdmin,
+  login,
+  requestPasswordReset,
+  verifyOtpAndReset,
+  listAdmin,
+  getAdminById,
+  updateAdmin,
+  deleteAdmin
 } from "../controllers/adminController.js";
 
 import { requireAuth } from "../middleware/auth.js";
@@ -17,7 +18,7 @@ const router = express.Router();
 /**
  * @swagger
  * tags:
- *   name: admin
+ *   name: Admin
  *   description: Admin management and authentication
  *
  * components:
@@ -26,9 +27,11 @@ const router = express.Router();
  *       type: http
  *       scheme: bearer
  *       bearerFormat: JWT
+ *
  *   schemas:
  *     AdminRegister:
  *       type: object
+ *       required: [name, email, password]
  *       properties:
  *         name:
  *           type: string
@@ -37,40 +40,54 @@ const router = express.Router();
  *           format: email
  *         password:
  *           type: string
- *       required:
- *         - name
- *         - email
- *         - password
+ *
  *     AdminLogin:
  *       type: object
+ *       required: [email, password]
  *       properties:
  *         email:
  *           type: string
  *           format: email
  *         password:
  *           type: string
- *       required:
- *         - email
- *         - password
- *     Admin:
+ *
+ *     AdminUpdate:
+ *       type: object
+ *       description: Only name and status can be updated
+ *       properties:
+ *         name:
+ *           type: string
+ *         status:
+ *           type: string
+ *           enum: [active, inactive]
+ *
+ *     AdminResponse:
  *       type: object
  *       properties:
- *         id:
+ *         adminID:
  *           type: string
  *         name:
  *           type: string
  *         email:
  *           type: string
- *           format: email
+ *         status:
+ *           type: string
+ *         createdAt:
+ *           type: number
+ *         updatedAt:
+ *           type: number
  */
 
-// Public Routes
+/* -------------------------------------------------------
+   PUBLIC ROUTES
+------------------------------------------------------- */
+
 /**
  * @swagger
  * /api/admin/register:
  *   post:
  *     summary: Register a new admin
- *     tags: [admin]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -79,9 +96,7 @@ const router = express.Router();
  *             $ref: '#/components/schemas/AdminRegister'
  *     responses:
  *       201:
- *         description: Admin created
- *       400:
- *         description: Validation error
+ *         description: Admin created successfully
  */
 router.post("/register", registerAdmin);
 
@@ -90,7 +105,7 @@ router.post("/register", registerAdmin);
  * /api/admin/login:
  *   post:
  *     summary: Login as admin
- *     tags: [admin]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:
@@ -99,7 +114,7 @@ router.post("/register", registerAdmin);
  *             $ref: '#/components/schemas/AdminLogin'
  *     responses:
  *       200:
- *         description: Login successful (returns token)
+ *         description: Login successful (returns token + cookie)
  *       401:
  *         description: Invalid credentials
  */
@@ -110,24 +125,21 @@ router.post("/login", login);
  * /api/admin/forgot-password/request-otp:
  *   post:
  *     summary: Request OTP for password reset
- *     tags: [admin]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [email]
  *             properties:
  *               email:
  *                 type: string
  *                 format: email
- *             required:
- *               - email
  *     responses:
  *       200:
- *         description: OTP sent
- *       404:
- *         description: Admin not found
+ *         description: OTP sent successfully
  */
 router.post("/forgot-password/request-otp", requestPasswordReset);
 
@@ -136,86 +148,107 @@ router.post("/forgot-password/request-otp", requestPasswordReset);
  * /api/admin/forgot-password/verify-reset:
  *   post:
  *     summary: Verify OTP and reset password
- *     tags: [admin]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [email, otp, newPassword]
  *             properties:
  *               email:
  *                 type: string
- *                 format: email
  *               otp:
  *                 type: string
  *               newPassword:
  *                 type: string
- *             required:
- *               - email
- *               - otp
- *               - newPassword
  *     responses:
  *       200:
  *         description: Password reset successful
- *       400:
- *         description: Invalid OTP or input
  */
 router.post("/forgot-password/verify-reset", verifyOtpAndReset);
 
-// Protected Routes
+/* -------------------------------------------------------
+   PROTECTED ROUTES (requireAuth)
+------------------------------------------------------- */
+
 /**
  * @swagger
  * /api/admin:
  *   get:
- *     summary: List all admin
- *     tags: [admin]
+ *     summary: List admins with pagination & search
+ *     tags: [Admin]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: number
+ *         description: Number of admins per page
+ *       - in: query
+ *         name: lastKey
+ *         schema:
+ *           type: string
+ *         description: Pagination cursor
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search by name/email
  *     responses:
  *       200:
- *         description: List of admin
- *         content:
- *           application/json:
- *             schema:
- *               type: array
- *               items:
- *                 $ref: '#/components/schemas/Admin'
+ *         description: Paginated admin list
  */
 router.get("/", requireAuth, listAdmin);
 
 /**
  * @swagger
  * /api/admin/{adminID}:
- *   put:
- *     summary: Update an admin by ID
- *     tags: [admin]
+ *   get:
+ *     summary: Get admin details by ID
+ *     tags: [Admin]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: adminID
+ *         required: true
  *         schema:
  *           type: string
+ *     responses:
+ *       200:
+ *         description: Admin details fetched
+ *       404:
+ *         description: Not found
+ */
+router.get("/:adminID", requireAuth, getAdminById);
+
+/**
+ * @swagger
+ * /api/admin/{adminID}:
+ *   put:
+ *     summary: Update admin (name, status only)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: adminID
  *         required: true
+ *         schema:
+ *           type: string
  *         description: Admin ID
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             properties:
- *               name:
- *                 type: string
- *               email:
- *                 type: string
- *                 format: email
+ *             $ref: '#/components/schemas/AdminUpdate'
  *     responses:
  *       200:
  *         description: Admin updated
- *       400:
- *         description: Validation error
  */
 router.put("/:adminID", requireAuth, updateAdmin);
 
@@ -223,22 +256,19 @@ router.put("/:adminID", requireAuth, updateAdmin);
  * @swagger
  * /api/admin/{adminID}:
  *   delete:
- *     summary: Delete an admin by ID
- *     tags: [admin]
+ *     summary: Delete admin by ID
+ *     tags: [Admin]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: adminID
+ *         required: true
  *         schema:
  *           type: string
- *         required: true
- *         description: Admin ID
  *     responses:
- *       204:
+ *       200:
  *         description: Admin deleted
- *       404:
- *         description: Admin not found
  */
 router.delete("/:adminID", requireAuth, deleteAdmin);
 
