@@ -19,6 +19,8 @@ const router = express.Router();
  *     summary: Ingest or update a viewer session analytics record
  *     description: Called by the player to create or update a viewer session in the analytics table.
  *     tags: [Analytics]
+ *     security:
+ *       - viewerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -151,9 +153,50 @@ router.get(
  *           minimum: 1
  *           maximum: 200
  *         description: Maximum number of sessions to return
+ *       - in: query
+ *         name: lastKey
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Pagination cursor from a previous response
  *     responses:
  *       200:
  *         description: List of recent sessions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 eventId:
+ *                   type: string
+ *                 sessions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       sessionId:
+ *                         type: string
+ *                       viewerId:
+ *                         type: string
+ *                         nullable: true
+ *                       eventId:
+ *                         type: string
+ *                       startTime:
+ *                         type: string
+ *                         format: date-time
+ *                       endTime:
+ *                         type: string
+ *                         format: date-time
+ *                         nullable: true
+ *                       duration:
+ *                         type: number
+ *                       isPaidViewer:
+ *                         type: boolean
+ *                       deviceType:
+ *                         type: string
+ *                 lastKey:
+ *                   type: string
+ *                   nullable: true
  *       400:
  *         description: Invalid eventId
  *       401:

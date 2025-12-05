@@ -9,6 +9,18 @@ const options = {
       version: "1.0.0",
       description: "API documentation for Admin Login and Event Management (Express + DynamoDB)",
     },
+    components: {
+      securitySchemes: {
+        // Existing admin/auth scheme can live alongside this.
+        viewerAuth: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "JWT",
+          description:
+            "Viewer JWT used by viewerAuth middleware (Authorization: Bearer <token> or x-viewer-token header)",
+        },
+      },
+    },
     servers: [
       {
         url: "http://localhost:5000",

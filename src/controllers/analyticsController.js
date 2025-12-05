@@ -38,14 +38,18 @@ class AnalyticsController {
       }
 
       const {
-        viewerId,
         endTime,
-        isPaidViewer,
         deviceInfo,
         location,
         network,
         meta,
       } = req.body || {};
+
+      // Derive viewer-related info from authenticated token when available to
+      // avoid trusting spoofable body fields.
+      const authViewer = req.viewer || req.user || null;
+      const viewerId = authViewer?.viewerId || authViewer?.id || null;
+      const isPaidViewer = authViewer ? Boolean(authViewer.isPaidViewer) : false;
 
       const item = {
         sessionId,
@@ -54,7 +58,7 @@ class AnalyticsController {
         startTime,
         endTime: endTime || null,
         duration: typeof durationSec === "number" ? durationSec : undefined,
-        isPaidViewer: Boolean(isPaidViewer),
+        isPaidViewer,
         deviceInfo: deviceInfo || undefined,
         location: location || undefined,
         network: network || undefined,
@@ -239,15 +243,19 @@ class AnalyticsController {
         return res.status(400).json({ message: "eventId is required" });
       }
 
-      const baseParams = {
+      const safeLimit = Math.min(Math.max(limit, 1), 200);
+
+      // Use the same GSI as summary for efficient access, ordered by
+      // startTime. This returns the most recent sessions first.
+      const queryParams = {
         TableName: ANALYTICS_TABLE,
-        FilterExpression: "#eventId = :eventId",
-        ExpressionAttributeNames: {
-          "#eventId": "eventId",
-        },
+        IndexName: "event-startTime-index",
+        KeyConditionExpression: "eventId = :eid",
         ExpressionAttributeValues: {
-          ":eventId": eventId,
+          ":eid": eventId,
         },
+        ScanIndexForward: false,
+        Limit: safeLimit,
       };
 
       const items = [];
@@ -255,24 +263,17 @@ class AnalyticsController {
 
       do {
         const params = lastEvaluatedKey
-          ? { ...baseParams, ExclusiveStartKey: lastEvaluatedKey }
-          : baseParams;
+          ? { ...queryParams, ExclusiveStartKey: lastEvaluatedKey }
+          : queryParams;
 
-        const data = await dynamoDB.scan(params).promise();
+        const data = await dynamoDB.query(params).promise();
         if (data.Items) {
           items.push(...data.Items);
         }
         lastEvaluatedKey = data.LastEvaluatedKey;
-      } while (lastEvaluatedKey && items.length < limit * 2);
+      } while (lastEvaluatedKey && items.length < safeLimit);
 
-      const sorted = items
-        .filter((s) => s.startTime)
-        .sort((a, b) =>
-          a.startTime < b.startTime ? 1 : a.startTime > b.startTime ? -1 : 0
-        )
-        .slice(0, limit);
-
-      const sessions = sorted.map((s) => ({
+      const sessions = items.map((s) => ({
         sessionId: s.sessionId,
         viewerId: s.viewerId || null,
         eventId: s.eventId,
@@ -283,7 +284,7 @@ class AnalyticsController {
         deviceType: (s.deviceInfo && s.deviceInfo.deviceType) || "unknown",
       }));
 
-      return res.json({ eventId, sessions });
+      return res.json({ eventId, sessions, lastKey: lastEvaluatedKey || null });
     } catch (error) {
       console.error("getRecentSessions error", error);
       return res
