@@ -8,7 +8,8 @@ import {
   listAdmin,
   getAdminById,
   updateAdmin,
-  deleteAdmin
+  deleteAdmin,getAdminProfile
+    ,logoutAdmin
 } from "../controllers/adminController.js";
 
 import { requireAuth } from "../middleware/auth.js";
@@ -169,9 +170,9 @@ router.post("/forgot-password/request-otp", requestPasswordReset);
  */
 router.post("/forgot-password/verify-reset", verifyOtpAndReset);
 
-/* -------------------------------------------------------
+/* 
    PROTECTED ROUTES (requireAuth)
-------------------------------------------------------- */
+ */
 
 /**
  * @swagger
@@ -202,6 +203,36 @@ router.post("/forgot-password/verify-reset", verifyOtpAndReset);
  *         description: Paginated admin list
  */
 router.get("/", requireAuth, listAdmin);
+
+/**
+ * @swagger
+ * /api/admin/profile:
+ *   get:
+ *     summary: Get logged-in admin profile
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Admin profile returned
+ *       401:
+ *         description: Unauthorized
+ */
+router.get("/profile", requireAuth, getAdminProfile);
+
+/**
+ * @swagger
+ * /api/admin/logout:
+ *   post:
+ *     summary: Logout admin (clears auth cookie)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Logged out successfully
+ */
+router.post("/logout", requireAuth, logoutAdmin);
 
 /**
  * @swagger
@@ -271,5 +302,7 @@ router.put("/:adminID", requireAuth, updateAdmin);
  *         description: Admin deleted
  */
 router.delete("/:adminID", requireAuth, deleteAdmin);
+
+
 
 export default router;

@@ -15,6 +15,7 @@ import { comparePassword, hashPassword } from "../utils/hash.js";
 import { generateOtp, getExpiry } from "../utils/otp.js";
 import { sendOtpEmail } from "../utils/sesMailer.js";
 
+
 const ADMIN_EMAIL_INDEX = process.env.ADMIN_EMAIL_INDEX || "email-index";
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = parseInt(process.env.JWT_EXPIRES_IN || "3600", 10);
@@ -347,6 +348,7 @@ export async function requestPasswordReset(req, res, next) {
     const otp = generateOtp();
     const expiry = getExpiry();
     const otpHash = await hashPassword(otp);
+    console.log("Generated OTP for", email, "is", otp); // For testing/demo purposes
 
     await ddbDocClient.send(
       new UpdateCommand({
@@ -413,6 +415,60 @@ export async function verifyOtpAndReset(req, res, next) {
     );
 
     res.json({ message: "Password updated" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+
+
+//  9. GET LOGGED-IN ADMIN PROFILE (ISO Dates)
+export async function getAdminProfile(req, res) {
+  try {
+    const adminID = req.user?.sub; // from JWT token
+
+    if (!adminID) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    
+
+
+    const result = await ddbDocClient.send(
+      new GetCommand({
+        TableName: TABLE,
+        Key: { adminID }
+      })
+    );
+
+    if (!result.Item) {
+      return res.status(404).json({ error: "Admin not found" });
+    }
+
+    const {
+      passwordHash,
+      passwordResetOTP,
+      passwordResetOtpExpiry,
+      ...safe
+    } = result.Item;
+
+    res.json(formatAdmin(safe));
+  } catch (err) {
+    next(err);
+  }
+}
+
+
+/*  10. LOGOUT ADMIN (Clear Cookie) */
+export async function logoutAdmin(req, res, next) {
+  try {
+    // Clear JWT cookie
+    res.clearCookie("token", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
+    return res.json({ message: "Logged out successfully" });
   } catch (err) {
     next(err);
   }
