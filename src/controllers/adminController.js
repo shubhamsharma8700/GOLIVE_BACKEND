@@ -19,7 +19,12 @@ import { sendOtpEmail } from "../utils/sesMailer.js";
 // FIX 1 → Correct Table Name
 // -----------------------------
 const ADMIN_TABLE = process.env.ADMIN_TABLE_NAME;
+if (!ADMIN_TABLE) {
+  throw new Error("Missing ENV variable: ADMIN_TABLE_NAME");
+}
+
 const ADMIN_EMAIL_INDEX = process.env.ADMIN_EMAIL_INDEX || "email-index";
+
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = parseInt(process.env.JWT_EXPIRES_IN || "3600", 10);
