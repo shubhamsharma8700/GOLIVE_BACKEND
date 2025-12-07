@@ -19,7 +19,7 @@ const router = express.Router();
 /**
  * @swagger
  * tags:
- *   name: admin
+ *   name: Admin
  *   description: Admin management and authentication
  *
  * components:
@@ -88,7 +88,7 @@ const router = express.Router();
  * /api/admin/register:
  *   post:
  *     summary: Register a new admin
- *     tags: [admin]
+ *     tags: [Admin]
  *     requestBody:
  *       required: true
  *       content:

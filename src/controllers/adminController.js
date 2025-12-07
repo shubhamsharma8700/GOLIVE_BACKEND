@@ -4,7 +4,6 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
-  TABLE,
   GetCommand,
   UpdateCommand
 } from "../config/awsClients.js";
@@ -16,13 +15,19 @@ import { generateOtp, getExpiry } from "../utils/otp.js";
 import { sendOtpEmail } from "../utils/sesMailer.js";
 
 
+// -----------------------------
+// FIX 1 → Correct Table Name
+// -----------------------------
+const ADMIN_TABLE = process.env.ADMIN_TABLE_NAME;
 const ADMIN_EMAIL_INDEX = process.env.ADMIN_EMAIL_INDEX || "email-index";
+
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = parseInt(process.env.JWT_EXPIRES_IN || "3600", 10);
 
 
-  //  Helper → Convert timestamps to ISO format
-
+// -----------------------------
+// Helper – Format timestamps
+// -----------------------------
 function formatAdmin(admin) {
   if (!admin) return null;
 
@@ -37,8 +42,9 @@ function formatAdmin(admin) {
 }
 
 
-  //  1. REGISTER ADMIN
-
+// ----------------------------------------------------
+// 1. REGISTER ADMIN
+// ----------------------------------------------------
 export async function registerAdmin(req, res, next) {
   try {
     const { name, email, password } = req.body;
@@ -46,9 +52,10 @@ export async function registerAdmin(req, res, next) {
     if (!name || !email || !password)
       return res.status(400).json({ error: "name, email, password required" });
 
+    // Check duplicate email
     const emailCheck = await ddbDocClient.send(
       new QueryCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         IndexName: ADMIN_EMAIL_INDEX,
         KeyConditionExpression: "email = :email",
         ExpressionAttributeValues: { ":email": email }
@@ -74,7 +81,7 @@ export async function registerAdmin(req, res, next) {
 
     await ddbDocClient.send(
       new PutCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Item: item
       })
     );
@@ -82,19 +89,23 @@ export async function registerAdmin(req, res, next) {
     delete item.passwordHash;
 
     res.status(201).json(formatAdmin(item));
+
   } catch (err) {
     next(err);
   }
 }
 
-//  2. LOGIN (with cookie support)
+
+// ----------------------------------------------------
+// 2. LOGIN (with cookie)
+// ----------------------------------------------------
 export async function login(req, res, next) {
   try {
     const { email, password } = req.body;
 
     const q = await ddbDocClient.send(
       new QueryCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         IndexName: ADMIN_EMAIL_INDEX,
         KeyConditionExpression: "email = :email",
         ExpressionAttributeValues: { ":email": email }
@@ -113,6 +124,7 @@ export async function login(req, res, next) {
     if (!valid)
       return res.status(401).json({ error: "Invalid credentials" });
 
+    // Issue JWT token
     const token = jwt.sign(
       {
         sub: admin.adminID,
@@ -133,7 +145,7 @@ export async function login(req, res, next) {
 
     await ddbDocClient.send(
       new UpdateCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID: admin.adminID },
         UpdateExpression: "SET lastLoginAt = :l, updatedAt = :u",
         ExpressionAttributeValues: {
@@ -159,7 +171,10 @@ export async function login(req, res, next) {
   }
 }
 
-//  3. LIST ADMINS (Pagination + Search + ISO Dates)
+
+// ----------------------------------------------------
+// 3. LIST ADMINS (Pagination + Search)
+// ----------------------------------------------------
 export async function listAdmin(req, res, next) {
   try {
     const limit = parseInt(req.query.limit || "20", 10);
@@ -169,7 +184,7 @@ export async function listAdmin(req, res, next) {
     // Count total items
     const totalScan = await ddbDocClient.send(
       new ScanCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Select: "COUNT"
       })
     );
@@ -177,7 +192,7 @@ export async function listAdmin(req, res, next) {
     const totalItems = totalScan.Count || 0;
 
     // Pagination scan
-    const params = { TableName: TABLE, Limit: limit };
+    const params = { TableName: ADMIN_TABLE, Limit: limit };
 
     if (lastKey) {
       params.ExclusiveStartKey = { adminID: lastKey };
@@ -216,14 +231,17 @@ export async function listAdmin(req, res, next) {
   }
 }
 
-//  4. GET ADMIN BY ID (ISO Dates)
+
+// ----------------------------------------------------
+// 4. GET ADMIN BY ID
+// ----------------------------------------------------
 export async function getAdminById(req, res, next) {
   try {
     const { adminID } = req.params;
 
     const result = await ddbDocClient.send(
       new GetCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID }
       })
     );
@@ -239,12 +257,16 @@ export async function getAdminById(req, res, next) {
     } = result.Item;
 
     res.json(formatAdmin(safe));
+
   } catch (err) {
     next(err);
   }
 }
 
-//  5. UPDATE ADMIN (ISO Dates)
+
+// ----------------------------------------------------
+// 5. UPDATE ADMIN
+// ----------------------------------------------------
 export async function updateAdmin(req, res, next) {
   try {
     const { adminID } = req.params;
@@ -274,7 +296,7 @@ export async function updateAdmin(req, res, next) {
 
     const updated = await ddbDocClient.send(
       new UpdateCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID },
         UpdateExpression: "SET " + updates.join(", "),
         ExpressionAttributeNames: names,
@@ -291,37 +313,50 @@ export async function updateAdmin(req, res, next) {
     } = updated.Attributes;
 
     res.json(formatAdmin(safe));
+
   } catch (err) {
     next(err);
   }
 }
 
-//  6. DELETE ADMIN
+
+// ----------------------------------------------------
+// 6. DELETE ADMIN
+// FIX 2 → Verify admin exists using ReturnValues: "ALL_OLD"
+// ----------------------------------------------------
 export async function deleteAdmin(req, res, next) {
   try {
     const { adminID } = req.params;
 
-    await ddbDocClient.send(
+    const result = await ddbDocClient.send(
       new DeleteCommand({
-        TableName: TABLE,
-        Key: { adminID }
+        TableName: ADMIN_TABLE,
+        Key: { adminID },
+        ReturnValues: "ALL_OLD"
       })
     );
 
+    if (!result.Attributes)
+      return res.status(404).json({ error: "Admin not found" });
+
     res.json({ message: "Admin deleted successfully" });
+
   } catch (err) {
     next(err);
   }
 }
 
-//  7. REQUEST OTP (ISO if returned)
+
+// ----------------------------------------------------
+// 7. REQUEST PASSWORD RESET
+// ----------------------------------------------------
 export async function requestPasswordReset(req, res, next) {
   try {
     const { email } = req.body;
 
     const q = await ddbDocClient.send(
       new QueryCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         IndexName: ADMIN_EMAIL_INDEX,
         KeyConditionExpression: "email = :email",
         ExpressionAttributeValues: { ":email": email }
@@ -335,7 +370,7 @@ export async function requestPasswordReset(req, res, next) {
     const admin = q.Items[0];
     const now = Date.now();
 
-    // Cooldown (2 minutes)
+    // Cooldown 2 minutes
     if (
       admin.passwordResetRequestedAt &&
       now - admin.passwordResetRequestedAt < 120000
@@ -348,11 +383,12 @@ export async function requestPasswordReset(req, res, next) {
     const otp = generateOtp();
     const expiry = getExpiry();
     const otpHash = await hashPassword(otp);
-    console.log("Generated OTP for", email, "is", otp); // For testing/demo purposes
+
+    console.log("Generated OTP for", email, "is", otp);
 
     await ddbDocClient.send(
       new UpdateCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID: admin.adminID },
         UpdateExpression:
           "SET passwordResetOTP = :otp, passwordResetOtpExpiry = :exp, passwordResetRequestedAt = :now",
@@ -371,19 +407,23 @@ export async function requestPasswordReset(req, res, next) {
       requestedAt: new Date(now).toISOString(),
       expiresAt: new Date(expiry).toISOString()
     });
+
   } catch (err) {
     next(err);
   }
 }
 
-//  8. VERIFY OTP + RESET PASSWORD
+
+// ----------------------------------------------------
+// 8. VERIFY OTP + RESET PASSWORD
+// ----------------------------------------------------
 export async function verifyOtpAndReset(req, res, next) {
   try {
     const { email, otp, newPassword } = req.body;
 
     const q = await ddbDocClient.send(
       new QueryCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         IndexName: ADMIN_EMAIL_INDEX,
         KeyConditionExpression: "email = :email",
         ExpressionAttributeValues: { ":email": email }
@@ -406,7 +446,7 @@ export async function verifyOtpAndReset(req, res, next) {
 
     await ddbDocClient.send(
       new UpdateCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID: admin.adminID },
         UpdateExpression:
           "SET passwordHash = :ph REMOVE passwordResetOTP, passwordResetOtpExpiry, passwordResetRequestedAt",
@@ -415,27 +455,27 @@ export async function verifyOtpAndReset(req, res, next) {
     );
 
     res.json({ message: "Password updated" });
+
   } catch (err) {
     next(err);
   }
 }
 
 
-
-//  9. GET LOGGED-IN ADMIN PROFILE (ISO Dates)
-export async function getAdminProfile(req, res) {
+// ----------------------------------------------------
+// 9. GET LOGGED-IN ADMIN PROFILE
+// ----------------------------------------------------
+export async function getAdminProfile(req, res, next) {
   try {
-    const adminID = req.user?.sub; // from JWT token
+    const adminID = req.user?.sub;
 
     if (!adminID) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    
-
 
     const result = await ddbDocClient.send(
       new GetCommand({
-        TableName: TABLE,
+        TableName: ADMIN_TABLE,
         Key: { adminID }
       })
     );
@@ -458,10 +498,11 @@ export async function getAdminProfile(req, res) {
 }
 
 
-/*  10. LOGOUT ADMIN (Clear Cookie) */
+// ----------------------------------------------------
+// 10. LOGOUT ADMIN
+// ----------------------------------------------------
 export async function logoutAdmin(req, res, next) {
   try {
-    // Clear JWT cookie
     res.clearCookie("token", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",

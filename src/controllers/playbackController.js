@@ -1,4 +1,7 @@
-import { dynamoDB } from "../config/awsClients.js";
+import {
+  ddbDocClient,
+  GetCommand
+} from "../config/awsClients.js";
 
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 
@@ -20,23 +23,36 @@ class PlaybackController {
         return res.status(403).json({ success: false, message: "Viewer not authorized for this event" });
       }
 
-      const eventResult = await dynamoDB.get({ TableName: EVENTS_TABLE, Key: { eventId } }).promise();
+      // ---- Fetch event ----
+      const eventResult = await ddbDocClient.send(
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId }
+        })
+      );
+
       if (!eventResult.Item) {
         return res.status(404).json({ success: false, message: "Event not found" });
       }
 
       const event = eventResult.Item;
-      const accessMode = event.accessMode;
 
-      if (accessMode === "paidAccess" && !viewer.isPaidViewer) {
-        return res.status(402).json({ success: false, message: "Payment required for this event" });
+      // ---- Access checks ----
+      if (event.accessMode === "paidAccess" && !viewer.isPaidViewer) {
+        return res.status(402).json({
+          success: false,
+          message: "Payment required for this event"
+        });
       }
 
-      // For now return a placeholder stream URL from the event; replace with signed URL logic later
+      // ---- Stream URL ----
       const streamUrl = event.liveUrl || event.vodUrl || null;
 
       if (!streamUrl) {
-        return res.status(503).json({ success: false, message: "Stream URL not configured" });
+        return res.status(503).json({
+          success: false,
+          message: "Stream URL not configured"
+        });
       }
 
       return res.status(200).json({
@@ -45,8 +61,9 @@ class PlaybackController {
         viewerId: viewer.viewerId,
         accessMode: viewer.accessMode,
         isPaidViewer: viewer.isPaidViewer,
-        streamUrl,
+        streamUrl
       });
+
     } catch (error) {
       console.error("getStream error", error);
       return res.status(500).json({ success: false, message: "Unable to fetch stream" });

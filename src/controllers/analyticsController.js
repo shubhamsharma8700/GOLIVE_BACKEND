@@ -1,52 +1,36 @@
-import { dynamoDB } from "../config/awsClients.js";
+import {
+  ddbDocClient,
+  PutCommand,
+  GetCommand,
+  QueryCommand,
+  ScanCommand,
+} from "../config/awsClients.js";
 
-// Allow table name to be configured via env; fall back to default for
-// local/dev until infrastructure is updated.
 const ANALYTICS_TABLE =
   process.env.ANALYTICS_TABLE_NAME || "go-live-analytics";
 
 class AnalyticsController {
+  // ======================================================
+  // UPSERT SESSION
+  // ======================================================
   static async upsertSession(req, res) {
     try {
-      // Minimal payload validation. TODO: tighten rules (e.g. max durations,
-      // stricter schemas) once client usage is stable.
       const { sessionId, eventId, startTime, durationSec } = req.body || {};
 
-      if (!sessionId || String(sessionId).length > 128) {
-        return res
-          .status(400)
-          .json({ error: "Invalid or missing sessionId" });
-      }
+      if (!sessionId || String(sessionId).length > 128)
+        return res.status(400).json({ error: "Invalid or missing sessionId" });
 
-      if (!eventId) {
+      if (!eventId)
         return res.status(400).json({ error: "Missing eventId" });
-      }
 
-      if (!startTime || Number.isNaN(Date.parse(startTime))) {
-        return res
-          .status(400)
-          .json({ error: "Invalid or missing startTime" });
-      }
+      if (!startTime || Number.isNaN(Date.parse(startTime)))
+        return res.status(400).json({ error: "Invalid or missing startTime" });
 
-      if (
-        durationSec !== undefined &&
-        typeof durationSec !== "number"
-      ) {
-        return res
-          .status(400)
-          .json({ error: "durationSec must be a number" });
-      }
+      if (durationSec !== undefined && typeof durationSec !== "number")
+        return res.status(400).json({ error: "durationSec must be a number" });
 
-      const {
-        endTime,
-        deviceInfo,
-        location,
-        network,
-        meta,
-      } = req.body || {};
+      const { endTime, deviceInfo, location, network, meta } = req.body || {};
 
-      // Derive viewer-related info from authenticated token when available to
-      // avoid trusting spoofable body fields.
       const authViewer = req.viewer || req.user || null;
       const viewerId = authViewer?.viewerId || authViewer?.id || null;
       const isPaidViewer = authViewer ? Boolean(authViewer.isPaidViewer) : false;
@@ -65,21 +49,19 @@ class AnalyticsController {
         meta: meta || undefined,
       };
 
-      // Clean out undefined so we don't overwrite existing attributes with them
-      Object.keys(item).forEach((key) => {
-        if (item[key] === undefined) {
-          delete item[key];
-        }
-      });
+      // Remove undefined fields
+      Object.keys(item).forEach((k) => item[k] === undefined && delete item[k]);
 
-      await dynamoDB
-        .put({
+      await ddbDocClient.send(
+        new PutCommand({
           TableName: ANALYTICS_TABLE,
           Item: item,
         })
-        .promise();
+      );
 
-      return res.status(200).json({ message: "Session analytics recorded" });
+      return res
+        .status(200)
+        .json({ message: "Session analytics recorded" });
     } catch (error) {
       console.error("upsertSession error", error);
       return res
@@ -88,39 +70,31 @@ class AnalyticsController {
     }
   }
 
+  // ======================================================
+  // EVENT SUMMARY (AGGREGATED ANALYTICS)
+  // ======================================================
   static async getEventSummary(req, res) {
     try {
       const { eventId } = req.params;
       const range = req.query.range || "24h";
 
-      if (!eventId) {
+      if (!eventId)
         return res.status(400).json({ message: "eventId is required" });
-      }
 
       const now = new Date();
       const from = new Date(now);
-      if (range === "1h") {
-        from.setHours(now.getHours() - 1);
-      } else if (range === "7d") {
-        from.setDate(now.getDate() - 7);
-      } else {
-        from.setDate(now.getDate() - 1);
-      }
+
+      if (range === "1h") from.setHours(now.getHours() - 1);
+      else if (range === "7d") from.setDate(now.getDate() - 7);
+      else from.setDate(now.getDate() - 1);
 
       const fromISO = from.toISOString();
 
-      // Prefer a query on a GSI (eventId + startTime) over a full table
-      // scan. This assumes a GSI named "event-startTime-index" exists; if it
-      // does not yet, the call will fail at runtime and should be addressed
-      // alongside infrastructure changes.
-      // TODO: create GSI (PK: eventId, SK: startTime) for this access pattern.
       const queryParams = {
         TableName: ANALYTICS_TABLE,
         IndexName: "event-startTime-index",
         KeyConditionExpression: "eventId = :eid AND #startTime >= :from",
-        ExpressionAttributeNames: {
-          "#startTime": "startTime",
-        },
+        ExpressionAttributeNames: { "#startTime": "startTime" },
         ExpressionAttributeValues: {
           ":eid": eventId,
           ":from": fromISO,
@@ -129,21 +103,21 @@ class AnalyticsController {
       };
 
       const items = [];
-      let lastEvaluatedKey;
+      let lastKey;
 
       do {
-        const params = lastEvaluatedKey
-          ? { ...queryParams, ExclusiveStartKey: lastEvaluatedKey }
-          : queryParams;
+        const resp = await ddbDocClient.send(
+          new QueryCommand({
+            ...queryParams,
+            ExclusiveStartKey: lastKey,
+          })
+        );
 
-        const data = await dynamoDB.query(params).promise();
-        if (data.Items) {
-          items.push(...data.Items);
-        }
-        lastEvaluatedKey = data.LastEvaluatedKey;
-      } while (lastEvaluatedKey);
+        if (resp.Items) items.push(...resp.Items);
+        lastKey = resp.LastEvaluatedKey;
+      } while (lastKey);
 
-      // Aggregation logic unchanged below – compute KPIs, timeseries, and break
+      // ----------------- AGGREGATION -----------------
       let totalViews = 0;
       let totalWatchTimeSec = 0;
       const viewerSet = new Set();
@@ -153,32 +127,33 @@ class AnalyticsController {
       const minuteConcurrent = new Map();
 
       for (const s of items) {
-        const sessionId = s.sessionId;
-        const viewerId = s.viewerId || sessionId;
+        const viewerId = s.viewerId || s.sessionId;
         const duration = Number(s.duration) || 0;
         const isPaid = Boolean(s.isPaidViewer);
-        const deviceType = (s.deviceInfo && s.deviceInfo.deviceType) || "unknown";
-        const country = (s.location && s.location.country) || "unknown";
-        const startTime = s.startTime ? new Date(s.startTime) : null;
-        const endTime = s.endTime ? new Date(s.endTime) : null;
+
+        const deviceType = s?.deviceInfo?.deviceType || "unknown";
+        const country = s?.location?.country || "unknown";
+
+        const start = s.startTime ? new Date(s.startTime) : null;
+        const end = s.endTime ? new Date(s.endTime) : null;
 
         totalViews += 1;
         totalWatchTimeSec += duration;
         viewerSet.add(viewerId);
-        if (isPaid) {
-          paidViewers += 1;
-        }
+        if (isPaid) paidViewers++;
+
         deviceCounts[deviceType] = (deviceCounts[deviceType] || 0) + 1;
         countryCounts[country] = (countryCounts[country] || 0) + 1;
 
-        if (startTime && endTime && endTime > from) {
-          const clampedStart = new Date(Math.max(startTime.getTime(), from.getTime()));
-          clampedStart.setSeconds(0, 0);
-          const endBucket = new Date(endTime);
+        if (start && end && end > from) {
+          const clamp = new Date(Math.max(start.getTime(), from.getTime()));
+          clamp.setSeconds(0, 0);
+
+          const endBucket = new Date(end);
           endBucket.setSeconds(0, 0);
 
           for (
-            let t = new Date(clampedStart);
+            let t = new Date(clamp);
             t <= endBucket;
             t.setMinutes(t.getMinutes() + 1)
           ) {
@@ -189,24 +164,18 @@ class AnalyticsController {
       }
 
       const uniqueViewers = viewerSet.size;
-      const avgWatchTimeSec = totalViews > 0 ? totalWatchTimeSec / totalViews : 0;
+      const avgWatchTimeSec =
+        totalViews > 0 ? totalWatchTimeSec / totalViews : 0;
 
       const concurrentSeries = Array.from(minuteConcurrent.entries())
         .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-        .map(([ts, value]) => ({ ts, value }));
+        .map(([ts, val]) => ({ ts, value: val }));
 
-      const concurrentPeak = concurrentSeries.reduce(
-        (max, point) => (point.value > max ? point.value : max),
-        0
-      );
-
-      const breakdownDevices = Object.entries(deviceCounts).map(
-        ([device, count]) => ({ device, count })
-      );
-
-      const breakdownCountries = Object.entries(countryCounts).map(
-        ([country, count]) => ({ country, count })
-      );
+      const concurrentPeak =
+        concurrentSeries.reduce(
+          (max, p) => (p.value > max ? p.value : max),
+          0
+        ) || 0;
 
       return res.json({
         eventId,
@@ -218,12 +187,16 @@ class AnalyticsController {
           paidViewers,
           concurrentPeak,
         },
-        timeseries: {
-          concurrent: concurrentSeries,
-        },
+        timeseries: { concurrent: concurrentSeries },
         breakdowns: {
-          byDevice: breakdownDevices,
-          byCountry: breakdownCountries,
+          byDevice: Object.entries(deviceCounts).map(([d, c]) => ({
+            device: d,
+            count: c,
+          })),
+          byCountry: Object.entries(countryCounts).map(([c, v]) => ({
+            country: c,
+            count: v,
+          })),
         },
       });
     } catch (error) {
@@ -234,44 +207,42 @@ class AnalyticsController {
     }
   }
 
+  // ======================================================
+  // RECENT SESSIONS
+  // ======================================================
   static async getRecentSessions(req, res) {
     try {
       const { eventId } = req.params;
       const limit = Number(req.query.limit) || 50;
 
-      if (!eventId) {
+      if (!eventId)
         return res.status(400).json({ message: "eventId is required" });
-      }
 
       const safeLimit = Math.min(Math.max(limit, 1), 200);
 
-      // Use the same GSI as summary for efficient access, ordered by
-      // startTime. This returns the most recent sessions first.
       const queryParams = {
         TableName: ANALYTICS_TABLE,
         IndexName: "event-startTime-index",
         KeyConditionExpression: "eventId = :eid",
-        ExpressionAttributeValues: {
-          ":eid": eventId,
-        },
+        ExpressionAttributeValues: { ":eid": eventId },
         ScanIndexForward: false,
         Limit: safeLimit,
       };
 
       const items = [];
-      let lastEvaluatedKey;
+      let lastKey;
 
       do {
-        const params = lastEvaluatedKey
-          ? { ...queryParams, ExclusiveStartKey: lastEvaluatedKey }
-          : queryParams;
+        const resp = await ddbDocClient.send(
+          new QueryCommand({
+            ...queryParams,
+            ExclusiveStartKey: lastKey,
+          })
+        );
 
-        const data = await dynamoDB.query(params).promise();
-        if (data.Items) {
-          items.push(...data.Items);
-        }
-        lastEvaluatedKey = data.LastEvaluatedKey;
-      } while (lastEvaluatedKey && items.length < safeLimit);
+        if (resp.Items) items.push(...resp.Items);
+        lastKey = resp.LastEvaluatedKey;
+      } while (lastKey && items.length < safeLimit);
 
       const sessions = items.map((s) => ({
         sessionId: s.sessionId,
@@ -284,7 +255,11 @@ class AnalyticsController {
         deviceType: (s.deviceInfo && s.deviceInfo.deviceType) || "unknown",
       }));
 
-      return res.json({ eventId, sessions, lastKey: lastEvaluatedKey || null });
+      return res.json({
+        eventId,
+        sessions,
+        lastKey: lastKey || null,
+      });
     } catch (error) {
       console.error("getRecentSessions error", error);
       return res
