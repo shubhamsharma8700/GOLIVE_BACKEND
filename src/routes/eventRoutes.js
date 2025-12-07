@@ -12,7 +12,7 @@ const router = express.Router();
 
 /**
  * @swagger
- * /api/admin/event/create:
+ * /api/event/create:
  *   post:
  *     summary: Create a new event
  *     tags: [Events]
@@ -80,7 +80,7 @@ router.post("/create", EventController.createEvent);
 
 /**
  * @swagger
- * /api/admin/event/list:
+ * /api/event/list:
  *   get:
  *     summary: List all events
  *     description: Retrieves all events from DynamoDB
@@ -94,7 +94,7 @@ router.get("/list", EventController.listEvents);
 
 /**
  * @swagger
- * /api/admin/event/update/{eventId}:
+ * /api/event/update/{eventId}:
  *   put:
  *     summary: Update an existing event
  *     description: Updates details of an existing event
@@ -174,7 +174,7 @@ router.put("/update/:eventId", EventController.updateEvent);
 
 /**
  * @swagger
- * /api/admin/event/delete/{eventId}:
+ * /api/event/delete/{eventId}:
  *   delete:
  *     summary: Delete an event
  *     description: Removes an event from DynamoDB
@@ -197,7 +197,7 @@ router.delete("/delete/:eventId", EventController.deleteEvent);
 
 /**
  * @swagger
- * /api/admin/event/event/{eventId}:
+ * /api/event/event/{eventId}:
  *   get:
  *     summary: Get event details
  *     description: Fetch a single event from DynamoDB by eventId
@@ -219,7 +219,7 @@ router.get("/event/:eventId", EventController.getEventById);
 
 /**
  * @swagger
- * /api/admin/event/channel/start:
+ * /api/event/channel/start:
  *   post:
  *     summary: Start an AWS MediaLive channel
  *     description: Initiates the start process for a MediaLive channel.
@@ -249,7 +249,7 @@ router.post("/channel/start", EventController.startChannel);
 
 /**
  * @swagger
- * /api/admin/event/channel/stop:
+ * /api/event/channel/stop:
  *   post:
  *     summary: Stop an AWS MediaLive channel
  *     description: Initiates the stop process for a MediaLive channel.

@@ -15,7 +15,9 @@ export default function viewerAuth(req, res, next) {
     req.viewer = payload;
     return next();
   } catch (error) {
+    console.log("viewerAuth payload", token);
     console.error("viewerAuth token error", error);
     return res.status(401).json({ success: false, message: "Invalid or expired viewer token" });
   }
+  
 }

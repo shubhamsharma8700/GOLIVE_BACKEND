@@ -5,6 +5,7 @@ import eventRoutes from "./routes/eventRoutes.js";
 import accessRoutes from "./routes/accessRoutes.js";
 import playbackRoutes from "./routes/playbackRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import analyticsRoutes from "./routes/analyticsRoutes.js";
 
 const app = express();
 // app.use(cors());
@@ -20,8 +21,9 @@ app.use(
 
 // Routes
 app.use("/api/admin", adminRoutes);
-app.use("/api/admin/event", eventRoutes);
+app.use("/api/event", eventRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
+app.use("/api/analytics", analyticsRoutes);
 
 export default app;
