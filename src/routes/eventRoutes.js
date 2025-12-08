@@ -1,5 +1,6 @@
 import express from "express";
 import EventController from "../controllers/eventController.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -16,6 +17,8 @@ const router = express.Router();
  *   post:
  *     summary: Create a new event
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -75,7 +78,7 @@ const router = express.Router();
  *       400:
  *         description: Invalid input
  */
-router.post("/create", EventController.createEvent);
+router.post("/create", requireAuth, EventController.createEvent);
 
 
 /**
@@ -85,11 +88,13 @@ router.post("/create", EventController.createEvent);
  *     summary: List all events
  *     description: Retrieves all events from DynamoDB
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: List of events retrieved successfully
  */
-router.get("/list", EventController.listEvents);
+router.get("/list", requireAuth, EventController.listEvents);
 
 
 /**
@@ -99,6 +104,8 @@ router.get("/list", EventController.listEvents);
  *     summary: Update an existing event
  *     description: Updates details of an existing event
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
@@ -169,7 +176,7 @@ router.get("/list", EventController.listEvents);
  *       404:
  *         description: Event not found
  */
-router.put("/update/:eventId", EventController.updateEvent);
+router.put("/update/:eventId", requireAuth, EventController.updateEvent);
 
 
 /**
@@ -179,6 +186,8 @@ router.put("/update/:eventId", EventController.updateEvent);
  *     summary: Delete an event
  *     description: Removes an event from DynamoDB
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
@@ -192,7 +201,7 @@ router.put("/update/:eventId", EventController.updateEvent);
  *       404:
  *         description: Event not found
  */
-router.delete("/delete/:eventId", EventController.deleteEvent);
+router.delete("/delete/:eventId", requireAuth, EventController.deleteEvent);
 
 
 /**
@@ -202,6 +211,8 @@ router.delete("/delete/:eventId", EventController.deleteEvent);
  *     summary: Get event details
  *     description: Fetch a single event from DynamoDB by eventId
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
@@ -215,7 +226,7 @@ router.delete("/delete/:eventId", EventController.deleteEvent);
  *       404:
  *         description: Event not found
  */
-router.get("/event/:eventId", EventController.getEventById);
+router.get("/event/:eventId", requireAuth, EventController.getEventById);
 
 /**
  * @swagger
@@ -224,6 +235,8 @@ router.get("/event/:eventId", EventController.getEventById);
  *     summary: Start an AWS MediaLive channel
  *     description: Initiates the start process for a MediaLive channel.
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -244,7 +257,7 @@ router.get("/event/:eventId", EventController.getEventById);
  *       500:
  *         description: Server error
  */
-router.post("/channel/start", EventController.startChannel);
+router.post("/channel/start", requireAuth, EventController.startChannel);
 
 
 /**
@@ -254,6 +267,8 @@ router.post("/channel/start", EventController.startChannel);
  *     summary: Stop an AWS MediaLive channel
  *     description: Initiates the stop process for a MediaLive channel.
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -274,7 +289,7 @@ router.post("/channel/start", EventController.startChannel);
  *       500:
  *         description: Server error
  */
-router.post("/channel/stop", EventController.stopChannel);
+router.post("/channel/stop", requireAuth, EventController.stopChannel);
 
 
 
