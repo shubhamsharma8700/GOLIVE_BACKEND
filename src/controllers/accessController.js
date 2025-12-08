@@ -128,7 +128,8 @@ export default class AccessController {
 
           email = primaryEmail;
 
-          const storedPassword = event.accessPassword || event.password;
+          // Use the plain, short password for emailing, not the hashed value
+          const storedPassword = event.password || event.accessPassword;
           if (!storedPassword) return res.status(500).json({ message: "Event password not configured" });
 
           // Send the password email directly via SES from the server
@@ -190,7 +191,8 @@ export default class AccessController {
         }
       }
 
-      // For freeAccess, clientViewerId is optional — we will not persist without it
+      // For all modes, we only persist and de-duplicate viewers when we have a stable clientViewerId
+      // clientViewerId must be generated once on the client and reused for every join of the same viewer for this event
       const shouldPersistViewer = Boolean(clientViewerId);
       let existingViewer = null;
       if (shouldPersistViewer) {

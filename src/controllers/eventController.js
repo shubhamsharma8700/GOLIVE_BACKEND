@@ -134,6 +134,8 @@ export default class EventController {
       if (accessMode === "passwordAccess") {
         if (!payload.accessPassword) return res.status(400).json({ message: "accessPassword is required for passwordAccess" });
         try {
+          // Store a short, human-friendly password in plain form ONLY for emailing to viewers
+          // and a hashed version for secure verification during login.
           accessPassword = await bcrypt.hash(payload.accessPassword, SALT_ROUNDS);
         } catch (err) {
           return res.status(400).json({ message: "Failed to hash password" });
@@ -182,6 +184,9 @@ export default class EventController {
         endTime: endTimeISO,
         accessMode,
         accessPassword,
+        // Plain password is kept separately for emailing to viewers (passwordAccess flows)
+        // This should be a short code configured by the admin (payload.accessPassword).
+        password: accessMode === "passwordAccess" ? payload.accessPassword : null,
         formFields,
         paymentAmount,
         currency,
