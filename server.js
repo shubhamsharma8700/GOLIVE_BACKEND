@@ -3,6 +3,7 @@ import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 import app from "./src/app.js";
 import adminRoutes from "./src/routes/adminRoutes.js";
+import presignRoutes from "./src/routes/presignRoutes.js";
 
 
 dotenv.config();
@@ -59,6 +60,8 @@ app.get("/api-docs-json", (req, res) => {
   res.json(swaggerDocs);
 });
 
+// PRESIGN ROUTES FROM presignRoutes.js
+app.use("/api/presign", presignRoutes);
 
 // ADMIN ROUTES FROM service.js
 

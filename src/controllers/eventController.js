@@ -1,6 +1,6 @@
-import { dynamoDB, eventBridge, medialive } from "../config/awsClients.js";
-import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcryptjs";
+import { v4 as uuidv4 } from "uuid";
+import { dynamoDB, medialive } from "../config/awsClients.js";
 
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 const EVENT_STATUSES = new Set(["draft", "scheduled", "live", "ended", "archived"]);
@@ -223,19 +223,24 @@ export default class EventController {
     }
   }
 
-  // UPDATE EVENT
-  static async updateEvent(req, res) {
+ static async updateEvent(req, res) {
     try {
       const { eventId } = req.params;
       if (!eventId) return res.status(400).json({ message: "Missing eventId" });
 
-      const existingResult = await dynamoDB.get({ TableName: EVENTS_TABLE, Key: { eventId } }).promise();
+      const existingResult = await dynamoDB.get({
+        TableName: EVENTS_TABLE,
+        Key: { eventId }
+      }).promise();
+
       if (!existingResult.Item) return res.status(404).json({ message: "Event not found" });
 
       const existing = existingResult.Item;
       const payload = req.body || {};
 
-      // Update only provided fields
+      // =============================
+      // EXISTING FIELD MERGE (UNCHANGED)
+      // =============================
       const title = payload.title !== undefined ? (payload.title || "").trim() : existing.title;
       const description = payload.description !== undefined ? (payload.description || "").trim() : existing.description;
       const status = payload.status !== undefined ? payload.status : existing.status;
@@ -245,40 +250,35 @@ export default class EventController {
       const accessMode = payload.accessMode !== undefined ? payload.accessMode : existing.accessMode;
       const createdBy = payload.createdBy !== undefined ? payload.createdBy : existing.createdBy;
 
-      // Validate required fields
       if (!title) return res.status(400).json({ message: "title cannot be empty" });
       if (!description) return res.status(400).json({ message: "description cannot be empty" });
       if (!EVENT_TYPES.has(eventType)) return res.status(400).json({ message: "eventType must be live or vod" });
-      if (!EVENT_STATUSES.has(status)) return res.status(400).json({ message: "status must be scheduled, live, vod, or ended" });
-      if (!ACCESS_MODES.has(accessMode)) return res.status(400).json({ message: "accessMode must be freeAccess, emailAccess, passwordAccess, or paidAccess" });
+      if (!EVENT_STATUSES.has(status)) return res.status(400).json({ message: "Invalid status" });
+      if (!ACCESS_MODES.has(accessMode)) return res.status(400).json({ message: "Invalid accessMode" });
 
-      // Parse dates
       let startTimeISO = startTime;
       let endTimeISO = endTime || null;
+
       try {
         if (payload.startTime) startTimeISO = toIsoString(payload.startTime);
         if (payload.endTime) endTimeISO = toIsoString(payload.endTime);
-      } catch (err) {
-        return res.status(400).json({ message: "Invalid startTime or endTime format" });
+      } catch {
+        return res.status(400).json({ message: "Invalid date format" });
       }
 
-      // Handle per-accessMode optional fields
       let accessPassword = existing.accessPassword || null;
       if (accessMode === "passwordAccess") {
         if (payload.accessPassword) {
-          try {
-            accessPassword = await bcrypt.hash(payload.accessPassword, SALT_ROUNDS);
-          } catch (err) {
-            return res.status(400).json({ message: "Failed to hash password" });
-          }
+          accessPassword = await bcrypt.hash(payload.accessPassword, SALT_ROUNDS);
         } else if (!accessPassword) {
-          return res.status(400).json({ message: "accessPassword is required for passwordAccess" });
+          return res.status(400).json({ message: "accessPassword required" });
         }
       } else {
         accessPassword = null;
       }
 
-      let formFields = existing.formFields || null;
+       let formFields = existing.formFields || null;
+
       if (accessMode === "emailAccess") {
         if (payload.formFields) {
           try {
@@ -297,9 +297,10 @@ export default class EventController {
         formFields = null;
       }
 
-      let paymentAmount = existing.paymentAmount || null;
+      let paymentAmount = existing.paymentAmount;
       let currency = existing.currency || null;
-      if (accessMode === "paidAccess") {
+
+       if (accessMode === "paidAccess") {
         if (payload.paymentAmount !== undefined) {
           try {
             paymentAmount = parseNumber(payload.paymentAmount);
@@ -321,6 +322,32 @@ export default class EventController {
         currency = null;
       }
 
+      // ========================================================
+      // ⭐ ADDED: VOD VIDEO ATTACHMENT LOGIC (ONLY NEW CODE)
+      // ========================================================
+      let vodUrl = existing.vodUrl || null;
+      let vodMetadata = existing.vodMetadata || null;
+
+      if (payload.vodVideoKey) {
+        if (eventType !== "vod") {
+          return res.status(400).json({ message: "VOD upload allowed only for VOD events" });
+        }
+
+        // Build S3 video URL
+        vodUrl = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${payload.vodVideoKey}`;
+
+        // Save full metadata
+        vodMetadata = {
+          key: payload.vodVideoKey,
+          duration: payload.vodDuration || null,
+          resolution: payload.vodResolution || null,
+          fileSize: payload.vodFileSize || null,
+          uploadedAt: new Date().toISOString()
+        };
+      }
+      // ========================================================
+
+      // FINAL UPDATED ITEM (ONLY ADDED vodUrl & vodMetadata)
       const now = new Date().toISOString();
       const updatedItem = {
         eventId,
@@ -336,11 +363,18 @@ export default class EventController {
         formFields,
         paymentAmount: paymentAmount ?? null,
         currency: currency ?? null,
+        // ONLY NEW FIELDS ADDED
+        vodUrl,
+        vodMetadata,
+
         createdAt: existing.createdAt,
         updatedAt: now,
       };
 
-      await dynamoDB.put({ TableName: EVENTS_TABLE, Item: updatedItem }).promise();
+      await dynamoDB.put({
+        TableName: EVENTS_TABLE,
+        Item: updatedItem
+      }).promise();
 
       return res.status(200).json({
         success: true,
@@ -350,12 +384,10 @@ export default class EventController {
 
     } catch (err) {
       console.error(err);
-      return res.status(500).json({
-        success: false,
-        message: "Unable to update event",
-      });
+      return res.status(500).json({ message: "Unable to update event" });
     }
   }
+
 
   // DELETE EVENT
   static async deleteEvent(req, res) {

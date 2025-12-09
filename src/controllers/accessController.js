@@ -1,6 +1,6 @@
-import { dynamoDB } from "../config/awsClients.js";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
+import { dynamoDB } from "../config/awsClients.js";
 import { signViewerToken } from "../utils/jwt.js";
 import { sendPasswordFromServer } from "../utils/sendPasswordFromServer.js";
 
@@ -95,6 +95,9 @@ export default class AccessController {
         const flowMode = normalizedMode === "register" ? "register" : "login";
 
         if (flowMode === "register") {
+
+          req._registrationOnly = true;
+          
           const registrationPayload = formData && typeof formData === "object" ? formData : {};
 
           const primaryEmail = email || registrationPayload.email;
@@ -246,7 +249,7 @@ export default class AccessController {
       }
 
       let token = null;
-      if (accessGranted) {
+      if (accessGranted && !req._registrationOnly) {
         try {
           token = signViewerToken({
             viewerId,
