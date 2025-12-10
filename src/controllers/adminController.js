@@ -26,9 +26,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = parseInt(process.env.JWT_EXPIRES_IN || "3600", 10);
 
 
-// -----------------------------
-// Helper – Format timestamps
-// -----------------------------
+// Helper to format admin object
 function formatAdmin(admin) {
   if (!admin) return null;
 
@@ -43,9 +41,7 @@ function formatAdmin(admin) {
 }
 
 
-// ----------------------------------------------------
 // 1. REGISTER ADMIN
-// ----------------------------------------------------
 export async function registerAdmin(req, res, next) {
   try {
     const { name, email, password } = req.body;
@@ -97,9 +93,7 @@ export async function registerAdmin(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 2. LOGIN (with cookie)
-// ----------------------------------------------------
 export async function login(req, res, next) {
   try {
     const { email, password } = req.body;
@@ -173,9 +167,7 @@ export async function login(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 3. LIST ADMINS (Pagination + Search)
-// ----------------------------------------------------
 export async function listAdmin(req, res, next) {
   try {
     const limit = parseInt(req.query.limit || "20", 10);
@@ -233,9 +225,7 @@ export async function listAdmin(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 4. GET ADMIN BY ID
-// ----------------------------------------------------
 export async function getAdminById(req, res, next) {
   try {
     const { adminID } = req.params;
@@ -265,9 +255,7 @@ export async function getAdminById(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 5. UPDATE ADMIN
-// ----------------------------------------------------
 export async function updateAdmin(req, res, next) {
   try {
     const { adminID } = req.params;
@@ -321,10 +309,7 @@ export async function updateAdmin(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 6. DELETE ADMIN
-// FIX 2 → Verify admin exists using ReturnValues: "ALL_OLD"
-// ----------------------------------------------------
 export async function deleteAdmin(req, res, next) {
   try {
     const { adminID } = req.params;
@@ -348,9 +333,7 @@ export async function deleteAdmin(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 7. REQUEST PASSWORD RESET
-// ----------------------------------------------------
 export async function requestPasswordReset(req, res, next) {
   try {
     const { email } = req.body;
@@ -415,9 +398,7 @@ export async function requestPasswordReset(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 8. VERIFY OTP + RESET PASSWORD
-// ----------------------------------------------------
 export async function verifyOtpAndReset(req, res, next) {
   try {
     const { email, otp, newPassword } = req.body;
@@ -463,9 +444,7 @@ export async function verifyOtpAndReset(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 9. GET LOGGED-IN ADMIN PROFILE
-// ----------------------------------------------------
 export async function getAdminProfile(req, res, next) {
   try {
     const adminID = req.user?.sub;
@@ -499,9 +478,7 @@ export async function getAdminProfile(req, res, next) {
 }
 
 
-// ----------------------------------------------------
 // 10. LOGOUT ADMIN
-// ----------------------------------------------------
 export async function logoutAdmin(req, res, next) {
   try {
     res.clearCookie("token", {

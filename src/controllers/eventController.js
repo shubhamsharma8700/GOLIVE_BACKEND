@@ -105,166 +105,152 @@ export default class EventController {
     }
   }
 
-  // =====================================================
-  // 2. CREATE EVENT
-  // =====================================================
-  static async createEvent(req, res) {
-    try {
-      const payload = req.body || {};
-      const title = payload.title?.trim();
-      const description = payload.description?.trim();
-      const { eventType, accessMode } = payload;
+// =====================================================
+// 2. CREATE EVENT  (Updated for new frontend payload)
+// =====================================================
+static async createEvent(req, res) {
+  try {
+    const payload = req.body || {};
 
-      // createdBy from JWT middleware
-      const createdBy =
-        req.user?.id ||
-        req.user?.adminId ||
-        req.user?.email ||
-        "unknown-admin";
+    const {
+      title,
+      description,
+      eventType,
+      accessMode,
 
-      // ------------------ VALIDATION ------------------
+      startTime,
+      endTime,
 
-      if (!title) return res.status(400).json({ message: "title is required" });
-      if (!description) return res.status(400).json({ message: "description is required" });
-      if (!eventType) return res.status(400).json({ message: "eventType is required" });
-      if (!EVENT_TYPES.has(eventType))
-        return res.status(400).json({ message: "eventType must be live or vod" });
+      s3Key,
+      s3Prefix,
 
-      if (!ACCESS_MODES.has(accessMode))
-        return res.status(400).json({ message: "Invalid accessMode" });
+      videoConfig,           // NEW
+      registrationFields,    // NEW ARRAY (instead of formFields)
 
-      // ------------------ LIVE ------------------
-      let startTime = null;
-      let endTime = null;
+      paymentAmount,
+      currency,
+      accessPasswordHash,    // FRONTEND VERSION (optional)
+      accessPassword         // RAW PASSWORD (if present)
+    } = payload;
 
-      if (eventType === "live") {
-        if (!payload.startTime)
-          return res.status(400).json({ message: "startTime required for live event" });
+    // ------------------ BASIC VALIDATION ------------------
+    if (!title) return res.status(400).json({ message: "title is required" });
+    if (!description) return res.status(400).json({ message: "description is required" });
+    if (!EVENT_TYPES.has(eventType))
+      return res.status(400).json({ message: "Invalid eventType" });
+    if (!ACCESS_MODES.has(accessMode))
+      return res.status(400).json({ message: "Invalid accessMode" });
 
-        startTime = toIsoString(payload.startTime);
-        endTime = payload.endTime ? toIsoString(payload.endTime) : null;
-      }
+    // CreatedBy from JWT
+    const createdBy =
+      req.user?.email ||
+      req.user?.id ||
+      req.user?.adminId ||
+      "unknown-admin";
 
-      // ------------------ VOD ------------------
-      let s3Key = null;
-      let s3Prefix = null;
+    // ------------------ LIVE LOGIC ------------------
+    let finalStart = null;
+    let finalEnd = null;
 
-      if (eventType === "vod") {
-        if (!payload.s3Key)
-          return res.status(400).json({ message: "s3Key is required for VOD" });
+    if (eventType === "live") {
+      if (!startTime)
+        return res.status(400).json({ message: "startTime is required" });
 
-        s3Key = payload.s3Key;
-        s3Prefix = s3Key.substring(0, s3Key.lastIndexOf("/") + 1);
-
-        // Ensure file exists
-        try {
-          await s3Client.send(
-            new HeadObjectCommand({ Bucket: VOD_BUCKET, Key: s3Key })
-          );
-        } catch {
-          return res.status(400).json({ message: "Invalid s3Key. File not found." });
-        }
-      }
-
-      // ------------------ ACCESS MODE LOGIC ------------------
-
-      let accessPassword = null;
-      let formFields = null;
-      let paymentAmount = null;
-      let currency = null;
-
-      // EMAIL ACCESS → default fields + custom merge
-      if (accessMode === "emailAccess") {
-        const defaultFields = {
-          firstName: { type: "string", required: true },
-          lastName: { type: "string", required: true },
-          email: { type: "string", required: true },
-        };
-
-        const custom = payload.formFields ? parseFormFields(payload.formFields) : {};
-        formFields = { ...defaultFields, ...custom };
-      }
-
-      // PASSWORD ACCESS → password required + optional custom form
-      if (accessMode === "passwordAccess") {
-        if (!payload.accessPassword)
-          return res.status(400).json({ message: "accessPassword required" });
-
-        accessPassword = await bcrypt.hash(payload.accessPassword, SALT_ROUNDS);
-
-        formFields = payload.formFields ? parseFormFields(payload.formFields) : null;
-      }
-
-      // PAID ACCESS → amount + currency
-      if (accessMode === "paidAccess") {
-        if (!payload.paymentAmount)
-          return res.status(400).json({ message: "paymentAmount required" });
-
-        if (!payload.currency)
-          return res.status(400).json({ message: "currency required" });
-
-        paymentAmount = parseNumber(payload.paymentAmount);
-        currency = resolveCurrency(payload.currency);
-      }
-
-      // FREE ACCESS → no form, no password
-      if (accessMode === "freeAccess") {
-        accessPassword = null;
-        formFields = null;
-        paymentAmount = null;
-        currency = null;
-      }
-
-      // ------------------ SAVE EVENT ------------------
-
-      const eventId = uuidv4();
-      const timestamp = nowISO();
-
-      const item = {
-        eventId,
-        title,
-        description,
-        eventType,
-        createdBy,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-
-        // Access
-        accessMode,
-        accessPassword,
-        formFields,
-        paymentAmount,
-        currency,
-
-        // Live
-        startTime,
-        endTime,
-        status: eventType === "live" ? "scheduled" : "uploaded",
-
-        // VOD
-        s3Key,
-        s3Prefix,
-        vodStatus: eventType === "vod" ? "UPLOADED" : null,
-      };
-
-      await ddbDocClient.send(
-        new PutCommand({
-          TableName: EVENTS_TABLE,
-          Item: item,
-        })
-      );
-
-      return res.status(201).json({
-        success: true,
-        message: "Event created successfully",
-        eventId,
-      });
-
-    } catch (err) {
-      console.error("Create event error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      finalStart = toIsoString(startTime);
+      finalEnd = endTime ? toIsoString(endTime) : null;
     }
+
+    // ------------------ VOD LOGIC ------------------
+    let finalS3Key = null;
+    let finalPrefix = null;
+
+    if (eventType === "vod") {
+      if (!s3Key)
+        return res.status(400).json({ message: "s3Key required for VOD" });
+
+      finalS3Key = s3Key;
+      finalPrefix = s3Prefix || s3Key.substring(0, s3Key.lastIndexOf("/") + 1);
+    }
+
+    // ------------------ ACCESS MODE ------------------
+    let finalPasswordHash = null;
+    let finalRegFields = null;
+    let finalPayment = null;
+    let finalCurrency = null;
+
+    if (accessMode === "passwordAccess") {
+      if (accessPasswordHash)
+        finalPasswordHash = accessPasswordHash;
+      else if (accessPassword)
+        finalPasswordHash = await bcrypt.hash(accessPassword, SALT_ROUNDS);
+      else
+        return res.status(400).json({ message: "Password required" });
+
+      finalRegFields = registrationFields || [];
+    }
+
+    if (accessMode === "emailAccess") {
+      finalRegFields = registrationFields || [];
+    }
+
+    if (accessMode === "paidAccess") {
+      finalPayment = Number(paymentAmount);
+      finalCurrency = currency;
+    }
+
+    if (accessMode === "freeAccess") {
+      finalRegFields = null;
+    }
+
+    // ------------------ SAVE ITEM ------------------
+    const now = nowISO();
+    const eventId = uuidv4();
+
+    const item = {
+      eventId,
+      title,
+      description,
+      eventType,
+      accessMode,
+      createdBy,
+      createdAt: now,
+      updatedAt: now,
+
+      startTime: finalStart,
+      endTime: finalEnd,
+
+      s3Key: finalS3Key,
+      s3Prefix: finalPrefix,
+      vodStatus: eventType === "vod" ? "UPLOADED" : null,
+
+      videoConfig,           // NEW
+      registrationFields: finalRegFields, // NEW
+
+      accessPassword: finalPasswordHash || null,
+      paymentAmount: finalPayment,
+      currency: finalCurrency,
+
+      status: eventType === "live" ? "scheduled" : "uploaded",
+    };
+
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: EVENTS_TABLE,
+        Item: item,
+      })
+    );
+
+    res.status(201).json({
+      success: true,
+      eventId,
+      message: "Event created",
+    });
+  } catch (err) {
+    console.error("Create Event Error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
+}
+
 
   // =====================================================
   // 3. LIST EVENTS (Search capable)
@@ -331,126 +317,69 @@ export default class EventController {
     }
   }
 
-  // =====================================================
-  // 5. UPDATE EVENT
-  // =====================================================
-  static async updateEvent(req, res) {
-    try {
-      const { eventId } = req.params;
-      const payload = req.body || {};
+// =====================================================
+// 5. UPDATE EVENT (Updated for new frontend payload)
+// =====================================================
+static async updateEvent(req, res) {
+  try {
+    const { eventId } = req.params;
+    const payload = req.body || {};
 
-      const { Item: existing } = await ddbDocClient.send(
-        new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
-      );
+    const { Item: existing } = await ddbDocClient.send(
+      new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
+    );
 
-      if (!existing)
-        return res.status(404).json({ success: false, message: "Event not found" });
+    if (!existing)
+      return res.status(404).json({ success: false, message: "Event not found" });
 
-      // Prevent switching between live/vod
-      if (payload.eventType && payload.eventType !== existing.eventType)
-        return res.status(400).json({ message: "Changing eventType is not allowed" });
+    // Prevent live ↔ vod change
+    if (payload.eventType && payload.eventType !== existing.eventType)
+      return res.status(400).json({ message: "eventType cannot be changed" });
 
-      // ------------------ LIVE ------------------
-      let startTime = existing.startTime;
-      let endTime = existing.endTime;
+    // ------------------ COMBINE FIELDS ------------------
+    const updated = {
+      ...existing,
+      ...payload,
+      updatedAt: nowISO(),
+    };
 
-      if (payload.startTime) startTime = toIsoString(payload.startTime);
-      if (payload.endTime) endTime = toIsoString(payload.endTime);
-
-      // ------------------ ACCESS MODE LOGIC ------------------
-
-      let accessMode = payload.accessMode || existing.accessMode;
-      let accessPassword = existing.accessPassword;
-      let formFields = existing.formFields;
-      let paymentAmount = existing.paymentAmount;
-      let currency = existing.currency;
-
-      // EMAIL ACCESS
-      if (accessMode === "emailAccess") {
-        const defaultFields = {
-          firstName: { type: "string", required: true },
-          lastName: { type: "string", required: true },
-          email: { type: "string", required: true },
-        };
-
-        const custom = payload.formFields ? parseFormFields(payload.formFields) : {};
-        formFields = { ...defaultFields, ...custom };
-
-        accessPassword = null;
-        paymentAmount = null;
-        currency = null;
-      }
-
-      // PASSWORD ACCESS
-      if (accessMode === "passwordAccess") {
-        if (payload.accessPassword)
-          accessPassword = await bcrypt.hash(payload.accessPassword, SALT_ROUNDS);
-
-        if (!accessPassword)
-          return res.status(400).json({ message: "accessPassword required" });
-
-        formFields = payload.formFields
-          ? parseFormFields(payload.formFields)
-          : formFields;
-
-        paymentAmount = null;
-        currency = null;
-      }
-
-      // PAID ACCESS
-      if (accessMode === "paidAccess") {
-        paymentAmount = payload.paymentAmount
-          ? parseNumber(payload.paymentAmount)
-          : paymentAmount;
-
-        currency = payload.currency
-          ? resolveCurrency(payload.currency)
-          : currency;
-
-        accessPassword = null;
-        formFields = null;
-      }
-
-      // FREE ACCESS
-      if (accessMode === "freeAccess") {
-        accessPassword = null;
-        formFields = null;
-        paymentAmount = null;
-        currency = null;
-      }
-
-      // ------------------ SAVE UPDATED EVENT ------------------
-
-      const updated = {
-        ...existing,
-        ...payload,
-        startTime,
-        endTime,
-        accessMode,
-        accessPassword,
-        formFields,
-        paymentAmount,
-        currency,
-        updatedAt: nowISO(),
-      };
-
-      await ddbDocClient.send(
-        new PutCommand({
-          TableName: EVENTS_TABLE,
-          Item: updated,
-        })
-      );
-
-      return res.status(200).json({
-        success: true,
-        message: "Event updated successfully",
-        eventId,
-      });
-    } catch (err) {
-      console.error("Update event error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+    // Normalize registration fields
+    if (payload.registrationFields) {
+      updated.registrationFields = payload.registrationFields;
     }
+
+    // Normalize video config
+    if (payload.videoConfig) {
+      updated.videoConfig = {
+        ...existing.videoConfig,
+        ...payload.videoConfig,
+      };
+    }
+
+    // Password update
+    if (payload.accessPasswordHash) {
+      updated.accessPassword = payload.accessPasswordHash;
+    }
+
+    // Save final version
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: EVENTS_TABLE,
+        Item: updated,
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Event updated",
+      eventId,
+    });
+  } catch (err) {
+    console.error("Update Event Error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
+}
+
 
   // =====================================================
   // 6. DELETE EVENT

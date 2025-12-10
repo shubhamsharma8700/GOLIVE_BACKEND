@@ -18,9 +18,44 @@ const router = express.Router();
  *       bearerFormat: JWT
  *
  *   schemas:
+ *     VideoConfig:
+ *       type: object
+ *       properties:
+ *         resolution:
+ *           type: string
+ *           example: "1080p"
+ *         frameRate:
+ *           type: string
+ *           example: "30"
+ *         bitrate:
+ *           type: string
+ *           example: "medium"
+ *         pixelProvider:
+ *           type: string
+ *           example: "none"
+ *         pixelId:
+ *           type: string
+ *           nullable: true
+ *
+ *     RegistrationField:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: string
+ *         label:
+ *           type: string
+ *         type:
+ *           type: string
+ *         required:
+ *           type: boolean
+ *
  *     EventCreate:
  *       type: object
- *       required: [title, description, eventType, accessMode]
+ *       required:
+ *         - title
+ *         - description
+ *         - eventType
+ *         - accessMode
  *       properties:
  *         title:
  *           type: string
@@ -29,28 +64,49 @@ const router = express.Router();
  *         eventType:
  *           type: string
  *           enum: [live, vod]
+ *         accessMode:
+ *           type: string
+ *           enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
+ *
+ *         # LIVE ONLY
  *         startTime:
  *           type: string
  *         endTime:
  *           type: string
+ *
+ *         # VOD ONLY
  *         s3Key:
  *           type: string
- *           description: Required for VOD events
- *         accessMode:
+ *           description: S3 key of uploaded VOD file
+ *         s3Prefix:
  *           type: string
- *           enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
+ *
+ *         # Video config (LIVE ONLY)
+ *         videoConfig:
+ *           $ref: '#/components/schemas/VideoConfig'
+ *
+ *         # Registration fields (email/password access)
+ *         registrationFields:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/RegistrationField'
+ *
+ *         # Access mode extras
+ *         accessPasswordHash:
+ *           type: string
  *         accessPassword:
  *           type: string
- *         formFields:
- *           type: object
+ *
+ *         # Payment access mode
  *         paymentAmount:
  *           type: number
  *         currency:
  *           type: string
+ *           example: "USD"
  *
  *     EventUpdate:
  *       type: object
- *       description: Only fields passed will be updated
+ *       description: Only provided fields are updated
  *       properties:
  *         title:
  *           type: string
@@ -60,12 +116,22 @@ const router = express.Router();
  *           type: string
  *         endTime:
  *           type: string
+ *         s3Key:
+ *           type: string
+ *         s3Prefix:
+ *           type: string
  *         accessMode:
  *           type: string
  *         accessPassword:
  *           type: string
- *         formFields:
- *           type: object
+ *         accessPasswordHash:
+ *           type: string
+ *         registrationFields:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/RegistrationField'
+ *         videoConfig:
+ *           $ref: '#/components/schemas/VideoConfig'
  *         paymentAmount:
  *           type: number
  *         currency:
@@ -84,6 +150,31 @@ const router = express.Router();
  *           type: string
  *         status:
  *           type: string
+ *         accessMode:
+ *           type: string
+ *         startTime:
+ *           type: string
+ *         endTime:
+ *           type: string
+ *
+ *         # VOD fields
+ *         s3Key:
+ *           type: string
+ *         s3Prefix:
+ *           type: string
+ *         vodStatus:
+ *           type: string
+ *
+ *         # Config
+ *         videoConfig:
+ *           $ref: '#/components/schemas/VideoConfig'
+ *         registrationFields:
+ *           type: array
+ *           items:
+ *             $ref: '#/components/schemas/RegistrationField'
+ *
+ *         createdBy:
+ *           type: string
  *         createdAt:
  *           type: string
  *         updatedAt:
@@ -97,16 +188,16 @@ const router = express.Router();
  * @swagger
  * /api/events/vod/presign:
  *   get:
- *     summary: Generate S3 pre-signed upload URL for VOD files
+ *     summary: Generate S3 pre-signed upload URL for VOD upload
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: filename
- *         required: true
  *         schema:
  *           type: string
+ *         required: true
  *       - in: query
  *         name: contentType
  *         schema:
@@ -114,7 +205,7 @@ const router = express.Router();
  *           default: video/mp4
  *     responses:
  *       200:
- *         description: Upload URL generated
+ *         description: Presigned URL returned
  */
 router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
 
@@ -125,11 +216,10 @@ router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
  * @swagger
  * /api/events:
  *   post:
- *     summary: Create a new Live or VOD event
+ *     summary: Create a new event (Live or VOD)
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
- *     description: createdBy is injected automatically from JWT.
  *     requestBody:
  *       required: true
  *       content:
@@ -139,6 +229,10 @@ router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
  *     responses:
  *       201:
  *         description: Event created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/EventResponse'
  */
 router.post("/", requireAuth, EventController.createEvent);
 
@@ -149,7 +243,7 @@ router.post("/", requireAuth, EventController.createEvent);
  * @swagger
  * /api/events:
  *   get:
- *     summary: Get all events (supports filters)
+ *     summary: Get all events (search + filter supported)
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
@@ -158,7 +252,7 @@ router.post("/", requireAuth, EventController.createEvent);
  *         name: q
  *         schema:
  *           type: string
- *         description: Search text
+ *         description: Text search across title/description
  *       - in: query
  *         name: type
  *         schema:
@@ -170,7 +264,7 @@ router.post("/", requireAuth, EventController.createEvent);
  *           type: number
  *     responses:
  *       200:
- *         description: Events retrieved
+ *         description: List of events
  */
 router.get("/", requireAuth, EventController.listEvents);
 
@@ -181,7 +275,7 @@ router.get("/", requireAuth, EventController.listEvents);
  * @swagger
  * /api/events/{eventId}:
  *   get:
- *     summary: Get event details by ID
+ *     summary: Get detailed event information
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
@@ -193,7 +287,11 @@ router.get("/", requireAuth, EventController.listEvents);
  *           type: string
  *     responses:
  *       200:
- *         description: Event details
+ *         description: Event details retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/EventResponse'
  */
 router.get("/:eventId", requireAuth, EventController.getEventById);
 
@@ -204,7 +302,7 @@ router.get("/:eventId", requireAuth, EventController.getEventById);
  * @swagger
  * /api/events/{eventId}:
  *   put:
- *     summary: Update an existing event
+ *     summary: Update an existing event (partial updates)
  *     tags: [Events]
  *     security:
  *       - bearerAuth: []
@@ -241,7 +339,7 @@ router.put("/:eventId", requireAuth, EventController.updateEvent);
  *         required: true
  *     responses:
  *       200:
- *         description: Event deleted
+ *         description: Event deleted successfully
  */
 router.delete("/:eventId", requireAuth, EventController.deleteEvent);
 
