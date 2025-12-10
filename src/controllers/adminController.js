@@ -14,10 +14,6 @@ import { comparePassword, hashPassword } from "../utils/hash.js";
 import { generateOtp, getExpiry } from "../utils/otp.js";
 import { sendOtpEmail } from "../utils/sesMailer.js";
 
-
-// -----------------------------
-// FIX 1 → Correct Table Name
-// -----------------------------
 const ADMIN_TABLE = process.env.ADMIN_TABLE_NAME;
 if (!ADMIN_TABLE) {
   throw new Error("Missing ENV variable: ADMIN_TABLE_NAME");

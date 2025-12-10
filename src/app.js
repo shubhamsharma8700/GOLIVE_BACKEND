@@ -22,7 +22,7 @@ app.use(
 
 // Routes
 app.use("/api/admin", adminRoutes);
-app.use("/api/event", eventRoutes);
+app.use("/api/events", eventRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
 app.use("/api/analytics", analyticsRoutes);

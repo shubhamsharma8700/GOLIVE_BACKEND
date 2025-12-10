@@ -1,5 +1,6 @@
 import express from "express";
 import EventController from "../controllers/eventController.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -7,216 +8,241 @@ const router = express.Router();
  * @swagger
  * tags:
  *   name: Events
- *   description: Event management API
+ *   description: Event Management API
+ *
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ *
+ *   schemas:
+ *     EventCreate:
+ *       type: object
+ *       required: [title, description, eventType, accessMode]
+ *       properties:
+ *         title:
+ *           type: string
+ *         description:
+ *           type: string
+ *         eventType:
+ *           type: string
+ *           enum: [live, vod]
+ *         startTime:
+ *           type: string
+ *         endTime:
+ *           type: string
+ *         s3Key:
+ *           type: string
+ *           description: Required for VOD events
+ *         accessMode:
+ *           type: string
+ *           enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
+ *         accessPassword:
+ *           type: string
+ *         formFields:
+ *           type: object
+ *         paymentAmount:
+ *           type: number
+ *         currency:
+ *           type: string
+ *
+ *     EventUpdate:
+ *       type: object
+ *       description: Only fields passed will be updated
+ *       properties:
+ *         title:
+ *           type: string
+ *         description:
+ *           type: string
+ *         startTime:
+ *           type: string
+ *         endTime:
+ *           type: string
+ *         accessMode:
+ *           type: string
+ *         accessPassword:
+ *           type: string
+ *         formFields:
+ *           type: object
+ *         paymentAmount:
+ *           type: number
+ *         currency:
+ *           type: string
+ *
+ *     EventResponse:
+ *       type: object
+ *       properties:
+ *         eventId:
+ *           type: string
+ *         title:
+ *           type: string
+ *         description:
+ *           type: string
+ *         eventType:
+ *           type: string
+ *         status:
+ *           type: string
+ *         createdAt:
+ *           type: string
+ *         updatedAt:
+ *           type: string
  */
 
+/* ============================================================
+   1. GET PRESIGNED URL FOR VOD UPLOAD
+   ============================================================ */
 /**
  * @swagger
- * /api/event/create:
- *   post:
- *     summary: Create a new event
+ * /api/events/vod/presign:
+ *   get:
+ *     summary: Generate S3 pre-signed upload URL for VOD files
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: filename
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: contentType
+ *         schema:
+ *           type: string
+ *           default: video/mp4
+ *     responses:
+ *       200:
+ *         description: Upload URL generated
+ */
+router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
+
+/* ============================================================
+   2. CREATE EVENT
+   ============================================================ */
+/**
+ * @swagger
+ * /api/events:
+ *   post:
+ *     summary: Create a new Live or VOD event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     description: createdBy is injected automatically from JWT.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required:
- *               - title
- *               - description
- *               - startTime
- *               - eventType
- *               - accessMode
- *               - status
- *               - createdBy
- *             properties:
- *               title:
- *                 type: string
- *                 example: AWS Workshop
- *               description:
- *                 type: string
- *                 example: Learn AWS Media Services
- *               startTime:
- *                 type: string
- *                 example: 2025-11-10T10:00:00Z
- *               endTime:
- *                 type: string
- *                 example: 2025-11-10T12:00:00Z
- *               eventType:
- *                 type: string
- *                 enum: [live, vod]
- *               status:
- *                 type: string
- *                 enum: [scheduled, live, vod, ended]
- *               accessMode:
- *                 type: string
- *                 enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
- *                 description: Access control type
- *               createdBy:
- *                 type: string
- *                 description: Admin ID
- *               accessPassword:
- *                 type: string
- *                 description: Required if accessMode = passwordAccess
- *               formFields:
- *                 type: object
- *                 description: Form schema for emailAccess (optional, e.g. firstName, lastName, email + custom fields)
- *               paymentAmount:
- *                 type: number
- *                 description: Required if accessMode = paidAccess
- *               currency:
- *                 type: string
- *                 example: USD
- *                 description: Required if accessMode = paidAccess
+ *             $ref: '#/components/schemas/EventCreate'
  *     responses:
  *       201:
- *         description: Event created
- *       400:
- *         description: Invalid input
+ *         description: Event created successfully
  */
-router.post("/create", EventController.createEvent);
+router.post("/", requireAuth, EventController.createEvent);
 
-
+/* ============================================================
+   3. LIST EVENTS
+   ============================================================ */
 /**
  * @swagger
- * /api/event/list:
+ * /api/events:
  *   get:
- *     summary: List all events
- *     description: Retrieves all events from DynamoDB
+ *     summary: Get all events (supports filters)
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search text
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [live, vod]
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: number
  *     responses:
  *       200:
- *         description: List of events retrieved successfully
+ *         description: Events retrieved
  */
-router.get("/list", EventController.listEvents);
+router.get("/", requireAuth, EventController.listEvents);
 
-
+/* ============================================================
+   4. GET EVENT BY ID
+   ============================================================ */
 /**
  * @swagger
- * /api/event/update/{eventId}:
- *   put:
- *     summary: Update an existing event
- *     description: Updates details of an existing event
+ * /api/events/{eventId}:
+ *   get:
+ *     summary: Get event details by ID
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
  *         required: true
- *         description: The ID of the event to update
  *         schema:
  *           type: string
+ *     responses:
+ *       200:
+ *         description: Event details
+ */
+router.get("/:eventId", requireAuth, EventController.getEventById);
+
+/* ============================================================
+   5. UPDATE EVENT
+   ============================================================ */
+/**
+ * @swagger
+ * /api/events/{eventId}:
+ *   put:
+ *     summary: Update an existing event
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: eventId
+ *         required: true
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             properties:
- *               title:
- *                 type: string
- *                 example: Updated AWS Workshop
- *               description:
- *                 type: string
- *                 example: Updated event description
- *               startTime:
- *                 type: string
- *                 example: 2025-11-10T10:00:00Z
- *               endTime:
- *                 type: string
- *                 example: 2025-11-10T12:00:00Z
- *               eventType:
- *                 type: string
- *                 enum: [live, vod]
- *               createdBy:
- *                 type: string
- *                 description: Admin ID if changing ownership
- *               thumbnailUrl:
- *                 type: string
- *                 example: https://example.com/thumbnail.png
- *               mediaLiveChannelId:
- *                 type: string
- *               mediaPackageChannelId:
- *                 type: string
- *               liveUrl:
- *                 type: string
- *               vodUrl:
- *                 type: string
- *               s3Bucket:
- *                 type: string
- *               accessMode:
- *                 type: string
- *                 enum: [freeAccess, emailAccess, passwordAccess, paidAccess]
- *                 description: Change the event gate type
- *               accessPassword:
- *                 type: string
- *                 description: Required if accessMode = passwordAccess
- *               formFields:
- *                 type: object
- *                 description: Form schema for emailAccess (optional)
- *               paymentAmount:
- *                 type: number
- *                 description: Required if accessMode = paidAccess
- *               currency:
- *                 type: string
- *                 description: Required if accessMode = paidAccess
- *               status:
- *                 type: string
- *                 enum: [scheduled, live, vod, ended]
+ *             $ref: '#/components/schemas/EventUpdate'
  *     responses:
  *       200:
  *         description: Event updated successfully
- *       404:
- *         description: Event not found
  */
-router.put("/update/:eventId", EventController.updateEvent);
+router.put("/:eventId", requireAuth, EventController.updateEvent);
 
-
+/* ============================================================
+   6. DELETE EVENT
+   ============================================================ */
 /**
  * @swagger
- * /api/event/delete/{eventId}:
+ * /api/events/{eventId}:
  *   delete:
  *     summary: Delete an event
- *     description: Removes an event from DynamoDB
  *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
  *         required: true
- *         description: ID of the event to delete
- *         schema:
- *           type: string
  *     responses:
  *       200:
- *         description: Event deleted successfully
- *       404:
- *         description: Event not found
+ *         description: Event deleted
  */
-router.delete("/delete/:eventId", EventController.deleteEvent);
-
-
-/**
- * @swagger
- * /api/event/event/{eventId}:
- *   get:
- *     summary: Get event details
- *     description: Fetch a single event from DynamoDB by eventId
- *     tags: [Events]
- *     parameters:
- *       - in: path
- *         name: eventId
- *         required: true
- *         description: Event ID to fetch
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Event retrieved successfully
- *       404:
- *         description: Event not found
- */
-router.get("/event/:eventId", EventController.getEventById);
-
-
+router.delete("/:eventId", requireAuth, EventController.deleteEvent);
 
 export default router;
