@@ -70,10 +70,31 @@ export const ses = new SESClient({ region: REGION });
 
 
 // ----------------------
+// S3 (v3)
+// ----------------------
+import { S3Client } from "@aws-sdk/client-s3";
+export const s3 = new S3Client({ region: REGION });
+
+
+// ----------------------
+// COST EXPLORER (v3)
+// ----------------------
+import { CostExplorerClient } from "@aws-sdk/client-cost-explorer";
+export const costExplorer = new CostExplorerClient({ region: REGION });
+
+
+// ----------------------
+// BUDGETS (v3)
+// ----------------------
+import { BudgetsClient } from "@aws-sdk/client-budgets";
+export const budgets = new BudgetsClient({ region: REGION });
+
+
+// ----------------------
 // STS (Check AWS Identity)
 // ----------------------
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-const sts = new STSClient({ region: REGION });
+export const sts = new STSClient({ region: REGION });
 
 sts.send(new GetCallerIdentityCommand({}))
   .then((id) => {
