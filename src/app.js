@@ -7,6 +7,7 @@ import playbackRoutes from "./routes/playbackRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
+import paymentRoutes from "./routes/paymentRoutes.js";
 
 const app = express();
 // app.use(cors());
@@ -26,6 +27,7 @@ app.use("/api/events", eventRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/payments",paymentRoutes );
 app.use("/api/aws", awsRoutes);
 
 export default app;
