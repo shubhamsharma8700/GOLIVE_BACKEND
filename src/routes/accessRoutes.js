@@ -135,6 +135,7 @@ const router = express.Router();
  *                   token: null
  */
 router.post("/event/:eventId/requestAccess", AccessController.requestAccess);
+router.post("/event/:eventId/resend-password", AccessController.resendPassword);
 
 /**
  * @swagger

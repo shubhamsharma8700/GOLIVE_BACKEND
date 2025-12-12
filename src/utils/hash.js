@@ -9,3 +9,5 @@ export async function hashPassword(password) {
 export async function comparePassword(password, hashed) {
   return bcrypt.compare(password, hashed);
 }
+
+

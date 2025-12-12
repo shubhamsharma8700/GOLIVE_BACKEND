@@ -1,69 +1,92 @@
-import AWS from "aws-sdk";
+// config/awsClients.js
 import dotenv from "dotenv";
 dotenv.config();
 
-AWS.config.update({
-  region: process.env.AWS_REGION || "ap-south-1",
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-});
+// ----------------------
+// AWS REGION
+// ----------------------
+const REGION = process.env.AWS_REGION || "ap-south-1";
 
-const dynamoDB = new AWS.DynamoDB.DocumentClient();
-const eventBridge = new AWS.EventBridge();
-const medialive = new AWS.MediaLive();
-const lambda = new AWS.Lambda();
-
-// Debug which AWS account/credentials are being used at startup
-try {
-  const sts = new AWS.STS();
-  sts
-    .getCallerIdentity()
-    .promise()
-    .then((id) => {
-      console.log("[AWS] Using account:", id.Account, "ARN:", id.Arn);
-    })
-    .catch((err) => {
-      console.error("[AWS] ERROR getting caller identity:", err);
-    });
-} catch (err) {
-  console.error("[AWS] Failed to initialize STS for caller identity:", err);
-}
-
-// AWS SDK v3 DynamoDB Setup
+// ----------------------
+// DYNAMODB (v3)
+// ----------------------
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
-  GetCommand,
   PutCommand,
+  GetCommand,
+  DeleteCommand,
   QueryCommand,
   ScanCommand,
-  UpdateCommand,
+  UpdateCommand
 } from "@aws-sdk/lib-dynamodb";
 
-const REGION = process.env.AWS_REGION || "ap-south-1";
 const ddbClient = new DynamoDBClient({ region: REGION });
 
-const marshallOptions = { removeUndefinedValues: true };
-
-const unmarshallOptions = {};
-
-const ddbDocClient = DynamoDBDocumentClient.from(ddbClient, {
-  marshallOptions,
-  unmarshallOptions,
+export const ddbDocClient = DynamoDBDocumentClient.from(ddbClient, {
+  marshallOptions: {
+    removeUndefinedValues: true,
+    convertEmptyValues: true,
+  },
 });
 
-const TABLE = process.env.DYNAMODB_TABLE;
-console.log("TABLE inside dynamo.js:", TABLE);
-
+// Export DynamoDB Commands
 export {
-  // SDK v3
-  ddbDocClient,
+  PutCommand,
+  GetCommand,
   DeleteCommand,
-  // SDK v2
-  dynamoDB,
-  eventBridge, GetCommand, lambda, medialive, PutCommand,
   QueryCommand,
-  ScanCommand, TABLE, UpdateCommand
+  ScanCommand,
+  UpdateCommand
 };
 
+
+// ----------------------
+// MEDIALIVE (v3)
+// ----------------------
+import { MediaLiveClient } from "@aws-sdk/client-medialive";
+export const medialive = new MediaLiveClient({ region: REGION });
+
+
+// ----------------------
+// EVENTBRIDGE (v3)
+// ----------------------
+import { EventBridgeClient } from "@aws-sdk/client-eventbridge";
+export const eventBridge = new EventBridgeClient({ region: REGION });
+
+
+// ----------------------
+// LAMBDA (v3)
+// ----------------------
+import { LambdaClient } from "@aws-sdk/client-lambda";
+export const lambda = new LambdaClient({ region: REGION });
+
+
+// ----------------------
+// SES (v3)
+// ----------------------
+import { SESClient } from "@aws-sdk/client-ses";
+export const ses = new SESClient({ region: REGION });
+
+
+// ----------------------
+// STS (Check AWS Identity)
+// ----------------------
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+const sts = new STSClient({ region: REGION });
+
+sts.send(new GetCallerIdentityCommand({}))
+  .then((id) => {
+    console.log("[AWS v3] Account:", id.Account, "ARN:", id.Arn);
+  })
+  .catch((err) => {
+    console.error("[AWS v3] STS Error:", err);
+  });
+
+
+// ----------------------
+// EXPORT TABLE NAMES
+// ----------------------
+export const ADMIN_TABLE_NAME = process.env.ADMIN_TABLE_NAME;
+export const EVENTS_TABLE_NAME = process.env.EVENTS_TABLE_NAME;
+export const USERS_TABLE_NAME = process.env.USERS_TABLE_NAME;
