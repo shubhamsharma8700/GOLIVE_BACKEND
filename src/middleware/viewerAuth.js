@@ -1,23 +1,54 @@
-import { verifyViewerToken } from "../utils/jwt.js";
+import { ddbDocClient, GetCommand } from "../config/awsClients.js";
 
-// Minimal viewer authentication middleware using JWT
-export default function viewerAuth(req, res, next) {
-  const authHeader = req.headers.authorization || req.headers["x-viewer-token"];
+const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
 
-  if (!authHeader) {
-    return res.status(401).json({ success: false, message: "Viewer token required" });
-  }
-
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
-
+/**
+ * Viewer Authentication Middleware
+ * Validates viewerToken stored in DynamoDB (NOT JWT)
+ */
+export default async function viewerAuth(req, res, next) {
   try {
-    const payload = verifyViewerToken(token);
-    req.viewer = payload;
+    const header =
+      req.headers.authorization ||
+      req.headers["x-viewer-token"];
+
+    if (!header) {
+      return res.status(401).json({ success: false, message: "Viewer token required" });
+    }
+
+    const token = header.replace("Bearer ", "").replace("ViewerToken ", "").trim();
+
+    if (!token) {
+      return res.status(401).json({ success: false, message: "Invalid viewer token" });
+    }
+
+    // ---- Direct PK lookup ----
+    const result = await ddbDocClient.send(
+      new GetCommand({
+        TableName: VIEWERS_TABLE,
+        Key: { viewerToken: token }
+      })
+    );
+
+    if (!result.Item) {
+      return res.status(401).json({
+        success: false,
+        message: "Viewer token not found"
+      });
+    }
+
+    const viewer = result.Item;
+
+    // ---- OPTIONAL TOKEN EXPIRY SUPPORT ----
+    if (viewer.tokenExpiresAt && new Date(viewer.tokenExpiresAt) < new Date()) {
+      return res.status(401).json({ success: false, message: "Viewer token expired" });
+    }
+
+    req.viewer = viewer;
     return next();
-  } catch (error) {
-    console.log("viewerAuth payload", token);
-    console.error("viewerAuth token error", error);
-    return res.status(401).json({ success: false, message: "Invalid or expired viewer token" });
+
+  } catch (err) {
+    console.error("viewerAuth error:", err);
+    return res.status(500).json({ success: false, message: "Viewer authentication failed" });
   }
-  
 }

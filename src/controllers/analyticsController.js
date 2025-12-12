@@ -1,56 +1,45 @@
 import {
   ddbDocClient,
   PutCommand,
-  GetCommand,
+  UpdateCommand,
   QueryCommand,
-  ScanCommand,
 } from "../config/awsClients.js";
+import { v4 as uuidv4 } from "uuid";
 
-const ANALYTICS_TABLE =
-  process.env.ANALYTICS_TABLE_NAME || "go-live-analytics";
+const ANALYTICS_TABLE = process.env.ANALYTICS_TABLE || "go-live-analytics";
+const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
 
-class AnalyticsController {
-  // ======================================================
-  // UPSERT SESSION
-  // ======================================================
-  static async upsertSession(req, res) {
+const nowISO = () => new Date().toISOString();
+
+export default class AnalyticsController {
+
+  /* ============================================================
+     1. START SESSION  (viewer)
+     ============================================================ */
+  static async startSession(req, res) {
     try {
-      const { sessionId, eventId, startTime, durationSec } = req.body || {};
+      const { eventId } = req.params;
+      const viewer = req.viewer;
 
-      if (!sessionId || String(sessionId).length > 128)
-        return res.status(400).json({ error: "Invalid or missing sessionId" });
+      if (!viewer) {
+        return res.status(401).json({ success: false, message: "Viewer unauthorized" });
+      }
 
-      if (!eventId)
-        return res.status(400).json({ error: "Missing eventId" });
-
-      if (!startTime || Number.isNaN(Date.parse(startTime)))
-        return res.status(400).json({ error: "Invalid or missing startTime" });
-
-      if (durationSec !== undefined && typeof durationSec !== "number")
-        return res.status(400).json({ error: "durationSec must be a number" });
-
-      const { endTime, deviceInfo, location, network, meta } = req.body || {};
-
-      const authViewer = req.viewer || req.user || null;
-      const viewerId = authViewer?.viewerId || authViewer?.id || null;
-      const isPaidViewer = authViewer ? Boolean(authViewer.isPaidViewer) : false;
+      const sessionId = uuidv4();
 
       const item = {
         sessionId,
         eventId,
-        viewerId,
-        startTime,
-        endTime: endTime || null,
-        duration: typeof durationSec === "number" ? durationSec : undefined,
-        isPaidViewer,
-        deviceInfo: deviceInfo || undefined,
-        location: location || undefined,
-        network: network || undefined,
-        meta: meta || undefined,
+        viewerId: viewer.viewerId,
+        playbackType: req.body.playbackType || "vod",
+        deviceInfo: req.body.deviceInfo || {},
+        location: req.body.location || {},
+        ipAddress: req.ip,
+        startTime: nowISO(),
+        endTime: null,
+        duration: 0,
+        createdAt: nowISO(),
       };
-
-      // Remove undefined fields
-      Object.keys(item).forEach((k) => item[k] === undefined && delete item[k]);
 
       await ddbDocClient.send(
         new PutCommand({
@@ -59,214 +48,136 @@ class AnalyticsController {
         })
       );
 
-      return res
-        .status(200)
-        .json({ message: "Session analytics recorded" });
-    } catch (error) {
-      console.error("upsertSession error", error);
-      return res
-        .status(500)
-        .json({ message: "Failed to record analytics session" });
+      return res.status(200).json({ success: true, sessionId });
+    } catch (err) {
+      console.error("startSession error:", err);
+      return res.status(500).json({ success: false, message: err.message });
     }
   }
 
-  // ======================================================
-  // EVENT SUMMARY (AGGREGATED ANALYTICS)
-  // ======================================================
+  /* ============================================================
+     2. END SESSION  (viewer)
+     ============================================================ */
+  static async endSession(req, res) {
+    try {
+      const { sessionId, duration } = req.body;
+
+      if (!sessionId)
+        return res.status(400).json({ success: false, message: "sessionId required" });
+
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: ANALYTICS_TABLE,
+          Key: { sessionId },
+          UpdateExpression: "set endTime = :end, duration = :dur",
+          ExpressionAttributeValues: {
+            ":end": nowISO(),
+            ":dur": duration || 0,
+          },
+        })
+      );
+
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error("endSession error:", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /* ============================================================
+     3. HEARTBEAT (viewer)
+     ============================================================ */
+  static async heartbeat(req, res) {
+    try {
+      const { sessionId, seconds } = req.body;
+
+      if (!sessionId)
+        return res.status(400).json({ success: false, message: "sessionId required" });
+
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: ANALYTICS_TABLE,
+          Key: { sessionId },
+          UpdateExpression: "ADD duration :sec",
+          ExpressionAttributeValues: {
+            ":sec": Number(seconds) || 0,
+          },
+        })
+      );
+
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      console.error("heartbeat error:", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  /* ============================================================
+     4. ADMIN — SUMMARY API (Required by your swagger)
+     ============================================================ */
   static async getEventSummary(req, res) {
     try {
       const { eventId } = req.params;
-      const range = req.query.range || "24h";
 
-      if (!eventId)
-        return res.status(400).json({ message: "eventId is required" });
+      const raw = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: ANALYTICS_TABLE,
+          IndexName: "eventId-index",
+          KeyConditionExpression: "eventId = :e",
+          ExpressionAttributeValues: { ":e": eventId },
+        })
+      );
 
-      const now = new Date();
-      const from = new Date(now);
+      const sessions = raw.Items || [];
 
-      if (range === "1h") from.setHours(now.getHours() - 1);
-      else if (range === "7d") from.setDate(now.getDate() - 7);
-      else from.setDate(now.getDate() - 1);
+      const totalSessions = sessions.length;
+      const totalWatchTime = sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+      const avgWatch = totalSessions ? totalWatchTime / totalSessions : 0;
 
-      const fromISO = from.toISOString();
-
-      const queryParams = {
-        TableName: ANALYTICS_TABLE,
-        IndexName: "event-startTime-index",
-        KeyConditionExpression: "eventId = :eid AND #startTime >= :from",
-        ExpressionAttributeNames: { "#startTime": "startTime" },
-        ExpressionAttributeValues: {
-          ":eid": eventId,
-          ":from": fromISO,
-        },
-        Limit: 1000,
-      };
-
-      const items = [];
-      let lastKey;
-
-      do {
-        const resp = await ddbDocClient.send(
-          new QueryCommand({
-            ...queryParams,
-            ExclusiveStartKey: lastKey,
-          })
-        );
-
-        if (resp.Items) items.push(...resp.Items);
-        lastKey = resp.LastEvaluatedKey;
-      } while (lastKey);
-
-      // ----------------- AGGREGATION -----------------
-      let totalViews = 0;
-      let totalWatchTimeSec = 0;
-      const viewerSet = new Set();
-      let paidViewers = 0;
-      const deviceCounts = {};
-      const countryCounts = {};
-      const minuteConcurrent = new Map();
-
-      for (const s of items) {
-        const viewerId = s.viewerId || s.sessionId;
-        const duration = Number(s.duration) || 0;
-        const isPaid = Boolean(s.isPaidViewer);
-
-        const deviceType = s?.deviceInfo?.deviceType || "unknown";
-        const country = s?.location?.country || "unknown";
-
-        const start = s.startTime ? new Date(s.startTime) : null;
-        const end = s.endTime ? new Date(s.endTime) : null;
-
-        totalViews += 1;
-        totalWatchTimeSec += duration;
-        viewerSet.add(viewerId);
-        if (isPaid) paidViewers++;
-
-        deviceCounts[deviceType] = (deviceCounts[deviceType] || 0) + 1;
-        countryCounts[country] = (countryCounts[country] || 0) + 1;
-
-        if (start && end && end > from) {
-          const clamp = new Date(Math.max(start.getTime(), from.getTime()));
-          clamp.setSeconds(0, 0);
-
-          const endBucket = new Date(end);
-          endBucket.setSeconds(0, 0);
-
-          for (
-            let t = new Date(clamp);
-            t <= endBucket;
-            t.setMinutes(t.getMinutes() + 1)
-          ) {
-            const key = t.toISOString();
-            minuteConcurrent.set(key, (minuteConcurrent.get(key) || 0) + 1);
-          }
-        }
-      }
-
-      const uniqueViewers = viewerSet.size;
-      const avgWatchTimeSec =
-        totalViews > 0 ? totalWatchTimeSec / totalViews : 0;
-
-      const concurrentSeries = Array.from(minuteConcurrent.entries())
-        .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-        .map(([ts, val]) => ({ ts, value: val }));
-
-      const concurrentPeak =
-        concurrentSeries.reduce(
-          (max, p) => (p.value > max ? p.value : max),
-          0
-        ) || 0;
-
-      return res.json({
+      return res.status(200).json({
+        success: true,
         eventId,
-        range,
-        kpis: {
-          totalViews,
-          uniqueViewers,
-          avgWatchTimeSec,
-          paidViewers,
-          concurrentPeak,
-        },
-        timeseries: { concurrent: concurrentSeries },
-        breakdowns: {
-          byDevice: Object.entries(deviceCounts).map(([d, c]) => ({
-            device: d,
-            count: c,
-          })),
-          byCountry: Object.entries(countryCounts).map(([c, v]) => ({
-            country: c,
-            count: v,
-          })),
+        summary: {
+          totalSessions,
+          totalWatchTime,
+          avgWatchTime: avgWatch,
         },
       });
-    } catch (error) {
-      console.error("getEventSummary error", error);
-      return res
-        .status(500)
-        .json({ message: "Failed to load analytics summary" });
+
+    } catch (err) {
+      console.error("getEventSummary error:", err);
+      return res.status(500).json({ success: false, message: err.message });
     }
   }
 
-  // ======================================================
-  // RECENT SESSIONS
-  // ======================================================
+  /* ============================================================
+     5. ADMIN — RECENT SESSIONS API (Required by your swagger)
+     ============================================================ */
   static async getRecentSessions(req, res) {
     try {
       const { eventId } = req.params;
-      const limit = Number(req.query.limit) || 50;
 
-      if (!eventId)
-        return res.status(400).json({ message: "eventId is required" });
+      const raw = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: ANALYTICS_TABLE,
+          IndexName: "eventId-index",
+          KeyConditionExpression: "eventId = :e",
+          ExpressionAttributeValues: { ":e": eventId },
+          Limit: 50,
+          ScanIndexForward: false,
+        })
+      );
 
-      const safeLimit = Math.min(Math.max(limit, 1), 200);
-
-      const queryParams = {
-        TableName: ANALYTICS_TABLE,
-        IndexName: "event-startTime-index",
-        KeyConditionExpression: "eventId = :eid",
-        ExpressionAttributeValues: { ":eid": eventId },
-        ScanIndexForward: false,
-        Limit: safeLimit,
-      };
-
-      const items = [];
-      let lastKey;
-
-      do {
-        const resp = await ddbDocClient.send(
-          new QueryCommand({
-            ...queryParams,
-            ExclusiveStartKey: lastKey,
-          })
-        );
-
-        if (resp.Items) items.push(...resp.Items);
-        lastKey = resp.LastEvaluatedKey;
-      } while (lastKey && items.length < safeLimit);
-
-      const sessions = items.map((s) => ({
-        sessionId: s.sessionId,
-        viewerId: s.viewerId || null,
-        eventId: s.eventId,
-        startTime: s.startTime,
-        endTime: s.endTime || null,
-        duration: Number(s.duration) || 0,
-        isPaidViewer: Boolean(s.isPaidViewer),
-        deviceType: (s.deviceInfo && s.deviceInfo.deviceType) || "unknown",
-      }));
-
-      return res.json({
+      return res.status(200).json({
+        success: true,
         eventId,
-        sessions,
-        lastKey: lastKey || null,
+        sessions: raw.Items || [],
       });
-    } catch (error) {
-      console.error("getRecentSessions error", error);
-      return res
-        .status(500)
-        .json({ message: "Failed to load recent sessions" });
+
+    } catch (err) {
+      console.error("getRecentSessions error:", err);
+      return res.status(500).json({ success: false, message: err.message });
     }
   }
-}
 
-export default AnalyticsController;
+}

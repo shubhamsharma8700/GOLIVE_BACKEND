@@ -7,17 +7,25 @@ import playbackRoutes from "./routes/playbackRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
+<<<<<<< HEAD
 import viewerEventRoutes from "./routes/viewerEventRoutes.js";
+=======
+import paymentRoutes from "./routes/paymentRoutes.js";
+>>>>>>> b5aff473b5fdba40862542a5842c57fab10cf907
 
 const app = express();
 // app.use(cors());
 app.use(bodyParser.json());
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: [
+      "http://localhost:5173",
+      "http://13.234.235.130:5173",
+    ],
     credentials: true,
   })
 );
+
 
 
 
@@ -27,6 +35,7 @@ app.use("/api/events", eventRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/payments",paymentRoutes );
 app.use("/api/aws", awsRoutes);
 app.use("/api/event", viewerEventRoutes);
 

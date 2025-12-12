@@ -8,121 +8,146 @@ const router = express.Router();
 /**
  * @swagger
  * tags:
- *   name: Analytics
- *   description: Event analytics and viewer statistics
+ *   - name: Analytics
+ *     description: Event analytics and viewer session tracking
  */
 
+/* ========================================================================
+   1. SESSION START (Player → onPlay)
+   ======================================================================== */
 /**
  * @swagger
- * /api/analytics/session:
+ * /api/analytics/{eventId}/session/start:
  *   post:
- *     summary: Ingest or update a viewer session analytics record
- *     description: Called by the player to create or update a viewer session in the analytics table.
+ *     summary: Start a viewer playback session
  *     tags: [Analytics]
  *     security:
- *       - viewerAuth: []
+ *       - bearerAuth: []
+ *     description: |
+ *       Viewer must be authenticated using viewerAuth.  
+ *       Creates a session record in the analytics table.
+ *     parameters:
+ *       - in: path
+ *         name: eventId
+ *         required: true
+ *         description: Event ID
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               playbackType:
+ *                 type: string
+ *                 enum: [live, vod]
+ *               deviceInfo:
+ *                 type: object
+ *               location:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Session created
+ */
+router.post(
+  "/:eventId/session/start",
+  viewerAuth,
+  AnalyticsController.startSession
+);
+
+/* ========================================================================
+   2. SESSION END (Player → onPause / onEnded)
+   ======================================================================== */
+/**
+ * @swagger
+ * /api/analytics/session/end:
+ *   post:
+ *     summary: End a playback session
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Marks the session as completed.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - sessionId
- *               - eventId
- *               - startTime
+ *             required: [sessionId]
  *             properties:
  *               sessionId:
  *                 type: string
- *                 description: Unique id for this viewer session
- *               eventId:
- *                 type: string
- *                 description: Event id this session belongs to
- *               viewerId:
- *                 type: string
- *                 description: Optional viewer/user id
- *               startTime:
- *                 type: string
- *                 format: date-time
- *                 description: Session start time in ISO format
- *               endTime:
- *                 type: string
- *                 format: date-time
- *                 description: Session end time in ISO format
- *               durationSec:
+ *               duration:
  *                 type: number
- *                 description: Total watched duration in seconds
- *               isPaidViewer:
- *                 type: boolean
- *               deviceInfo:
- *                 type: object
- *                 properties:
- *                   deviceType:
- *                     type: string
- *                   os:
- *                     type: string
- *                   browser:
- *                     type: string
- *               location:
- *                 type: object
- *                 properties:
- *                   country:
- *                     type: string
- *                   city:
- *                     type: string
- *               network:
- *                 type: object
- *                 properties:
- *                   bandwidthKbps:
- *                     type: number
- *               meta:
- *                 type: object
- *                 additionalProperties: true
  *     responses:
  *       200:
- *         description: Session analytics recorded
- *       400:
- *         description: Missing or invalid fields
- *       401:
- *         description: Unauthorized
- *       500:
- *         description: Server error
+ *         description: Session ended
  */
-// Use viewer-level auth for ingestion so player clients can send analytics
-// without requiring full admin credentials.
-router.post("/session", viewerAuth, AnalyticsController.upsertSession);
+router.post("/session/end", viewerAuth, AnalyticsController.endSession);
 
+/* ========================================================================
+   3. HEARTBEAT (Every 30 seconds)
+   ======================================================================== */
+/**
+ * @swagger
+ * /api/analytics/session/heartbeat:
+ *   post:
+ *     summary: Increment watch-time
+ *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Called by player every 30 seconds to add watch-time.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sessionId, seconds]
+ *             properties:
+ *               sessionId:
+ *                 type: string
+ *               seconds:
+ *                 type: number
+ *                 description: Time to add
+ *     responses:
+ *       200:
+ *         description: Updated duration
+ */
+router.post(
+  "/session/heartbeat",
+  viewerAuth,
+  AnalyticsController.heartbeat
+);
+
+/* ========================================================================
+   4. ADMIN: EVENT ANALYTICS SUMMARY
+   ======================================================================== */
 /**
  * @swagger
  * /api/analytics/{eventId}/summary:
  *   get:
  *     summary: Get analytics summary for an event
- *     description: Returns KPI tiles and time-series analytics for a specific event over a given time range.
  *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
+ *     description: Returns totals, averages, and engagement stats.
  *     parameters:
  *       - in: path
  *         name: eventId
  *         required: true
  *         schema:
  *           type: string
- *         description: ID of the event to get analytics for
  *       - in: query
  *         name: range
- *         required: false
  *         schema:
  *           type: string
- *           enum: ["1h", "24h", "7d"]
- *           default: "24h"
- *         description: Time range to aggregate over
+ *           enum: [1h, 24h, 7d]
  *     responses:
  *       200:
- *         description: Analytics summary for the event
- *       400:
- *         description: Invalid eventId or parameters
- *       401:
- *         description: Unauthorized
- *       500:
- *         description: Server error
+ *         description: Event analytics summary
  */
 router.get(
   "/:eventId/summary",
@@ -130,79 +155,35 @@ router.get(
   AnalyticsController.getEventSummary
 );
 
+/* ========================================================================
+   5. ADMIN: RECENT SESSIONS
+   ======================================================================== */
 /**
  * @swagger
  * /api/analytics/{eventId}/recent-sessions:
  *   get:
- *     summary: Get recent viewer sessions for an event
- *     description: Returns a list of recent viewer sessions for an event.
+ *     summary: Recent viewer sessions
  *     tags: [Analytics]
+ *     security:
+ *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: eventId
  *         required: true
  *         schema:
  *           type: string
- *         description: ID of the event to get sessions for
  *       - in: query
  *         name: limit
- *         required: false
  *         schema:
- *           type: integer
+ *           type: number
  *           default: 50
- *           minimum: 1
- *           maximum: 200
- *         description: Maximum number of sessions to return
  *       - in: query
  *         name: lastKey
- *         required: false
  *         schema:
  *           type: string
- *         description: Pagination cursor from a previous response
  *     responses:
  *       200:
- *         description: List of recent sessions
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 eventId:
- *                   type: string
- *                 sessions:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       sessionId:
- *                         type: string
- *                       viewerId:
- *                         type: string
- *                         nullable: true
- *                       eventId:
- *                         type: string
- *                       startTime:
- *                         type: string
- *                         format: date-time
- *                       endTime:
- *                         type: string
- *                         format: date-time
- *                         nullable: true
- *                       duration:
- *                         type: number
- *                       isPaidViewer:
- *                         type: boolean
- *                       deviceType:
- *                         type: string
- *                 lastKey:
- *                   type: string
- *                   nullable: true
- *       400:
- *         description: Invalid eventId
- *       401:
- *         description: Unauthorized
- *       500:
- *         description: Server error
+ *         description: List of sessions
  */
 router.get(
   "/:eventId/recent-sessions",
