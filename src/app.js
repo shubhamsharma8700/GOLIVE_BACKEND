@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
+
 import eventRoutes from "./routes/eventRoutes.js";
 import accessRoutes from "./routes/accessRoutes.js";
 import playbackRoutes from "./routes/playbackRoutes.js";
@@ -8,30 +9,73 @@ import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
+import PaymentsController from "./controllers/paymentsController.js";
 
 const app = express();
-// app.use(cors());
-app.use(bodyParser.json());
+app.set("trust proxy", true);
+
+/* ======================================================
+   CORS (MUST be first)
+====================================================== */
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://13.234.235.130:5173",
+  "https://d2wmdj5cojtj0q.cloudfront.net",
+];
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173",
-      "http://13.234.235.130:5173",
-    ],
+    origin: function (origin, callback) {
+      // Allow non-browser tools (Postman, curl)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+    ],
+    exposedHeaders: ["Set-Cookie"],
+    optionsSuccessStatus: 204,
   })
 );
 
 
+/* ======================================================
+   Stripe Webhook (RAW BODY ONLY)
+====================================================== */
+app.post(
+  "/api/payments/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    // Stripe needs raw body, NOT JSON
+    req.rawBody = req.body;
+    return PaymentsController.webhook(req, res);
+  }
+);
 
+/* ======================================================
+   JSON body parser (AFTER webhook)
+====================================================== */
+app.use(bodyParser.json());
 
-// Routes
+/* ======================================================
+   API Routes
+====================================================== */
 app.use("/api/admin", adminRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
 app.use("/api/analytics", analyticsRoutes);
-app.use("/api/payments",paymentRoutes );
+app.use("/api/payments", paymentRoutes); // ← create-session, verify, admin
 app.use("/api/aws", awsRoutes);
 
 export default app;

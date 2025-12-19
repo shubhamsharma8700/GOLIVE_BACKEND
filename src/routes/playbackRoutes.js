@@ -134,46 +134,5 @@ router.post("/event/:eventId/verify-password", PlaybackController.verifyPassword
 router.get("/event/:eventId/stream", viewerAuth, PlaybackController.getStream);
 
 
-/* ============================================================
-   5. SESSION LOGGING (analytics)
-   ============================================================ */
-/**
- * @swagger
- * /api/playback/event/{eventId}/session:
- *   post:
- *     summary: Log playback session (start/end)
- *     tags: [Playback]
- *     parameters:
- *       - in: path
- *         name: eventId
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [action, viewerToken]
- *             properties:
- *               action:
- *                 type: string
- *                 enum: [start, end]
- *               sessionId: 
- *                 type: string
- *               viewerToken:
- *                 type: string
- *               deviceInfo:
- *                 type: object
- *               duration:
- *                 type: number
- *               endTime:
- *                 type: string
- *     responses:
- *       200: { description: Session updated }
- *       201: { description: Session started }
- */
-router.post("/event/:eventId/session", PlaybackController.logSession);
-
 
 export default router;

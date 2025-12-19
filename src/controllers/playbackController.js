@@ -1,103 +1,207 @@
 // src/controllers/playbackController.js
+
 import {
   ddbDocClient,
   PutCommand,
   GetCommand,
   UpdateCommand,
-  ScanCommand,
 } from "../config/awsClients.js";
 
 import { v4 as uuidv4 } from "uuid";
-import { signViewerToken } from "../utils/viewerJwt.js";
 import bcrypt from "bcryptjs";
 
-const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
-const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
-const SESSIONS_TABLE = process.env.SESSIONS_TABLE_NAME || "go-live-poc-sessions";
+import { signViewerToken } from "../utils/viewerJwt.js";
+import { sendPasswordFromServer } from "../utils/sendPasswordFromServer.js";
+
+const EVENTS_TABLE =
+  process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
+const VIEWERS_TABLE =
+  process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
 
 const nowISO = () => new Date().toISOString();
 
-export default class PlaybackController {
+/* =========================================================
+   STREAM RESOLUTION + TIME GATING
+========================================================= */
+function resolveStreamUrl(event) {
+  const now = new Date();
 
-  /**
-   * GET /api/playback/:eventId/access
-   * Describe access model & registration fields (frontend will decide UI)
-   */
-  static async getAccessConfig(req, res) {
-    try {
-      const { eventId } = req.params;
-      if (!eventId) return res.status(400).json({ success: false, message: "eventId required" });
+  const startTime = event.startTime ? new Date(event.startTime) : null;
+  const endTime = event.endTime ? new Date(event.endTime) : null;
 
-      const { Item } = await ddbDocClient.send(
-        new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
-      );
+  const liveUrl =
+    event.cloudFrontUrl ||
+    event.mediaPackageUrl ||
+    null;
 
-      if (!Item) return res.status(404).json({ success: false, message: "Event not found" });
+  const vodUrl =
+    event.vodcloudFrontUrl ||
+    event.vodCloudFrontUrl ||
+    event.vod1080pUrl ||
+    event.vod720pUrl ||
+    event.vod480pUrl ||
+    null;
 
-      const accessMode = Item.accessMode || "freeAccess";
-
-      // determine required fields depending on mode
-      const requiresForm = accessMode === "emailAccess" || accessMode === "passwordAccess" || accessMode === "paidAccess";
-      const requiresPassword = accessMode === "passwordAccess";
-
-      // default/explicit registration fields come from event.registrationFields (if any)
-      const registrationFields = Array.isArray(Item.registrationFields)
-        ? Item.registrationFields
-        : (Item.registrationFields ? Object.entries(Item.registrationFields).map(([id, cfg]) => ({ id, ...cfg })) : []);
-
-      return res.status(200).json({
-        success: true,
-        accessMode,
-        requiresForm,
-        requiresPassword,
-        registrationFields,
-      });
-    } catch (err) {
-      console.error("getAccessConfig error", err);
-      return res.status(500).json({ success: false, message: err.message });
+  /* ---------------- SCHEDULED / LIVE ---------------- */
+  if (event.eventType === "live" || event.eventType === "scheduled") {
+    if (startTime && now < startTime) {
+      return {
+        blocked: true,
+        reason: "Event has not started yet",
+      };
     }
+
+    if (endTime && now > endTime) {
+      if (event.vodStatus === "READY" && vodUrl) {
+        return { streamUrl: vodUrl, playbackType: "vod" };
+      }
+
+      return {
+        blocked: true,
+        reason: "Event has ended",
+      };
+    }
+
+    if (liveUrl) {
+      return { streamUrl: liveUrl, playbackType: "live" };
+    }
+
+    return {
+      blocked: true,
+      reason: "Live stream not available yet",
+    };
   }
 
-  /**
-   * POST /api/playback/:eventId/register
-   * Register a viewer record (per-event viewerToken). Returns viewerToken.
-   */
+  /* ---------------- VOD ---------------- */
+  if (event.eventType === "vod") {
+    if (event.vodStatus === "READY" && vodUrl) {
+      return { streamUrl: vodUrl, playbackType: "vod" };
+    }
+
+    return {
+      blocked: true,
+      reason: "VOD is still processing",
+    };
+  }
+
+  return {
+    blocked: true,
+    reason: "Unsupported event type",
+  };
+}
+
+/* =========================================================
+   PLAYBACK CONTROLLER
+========================================================= */
+export default class PlaybackController {
+  /* =====================================================
+     GET ACCESS CONFIG
+  ===================================================== */
+static async getAccessConfig(req, res) {
+  try {
+    const { eventId } = req.params;
+    if (!eventId) {
+      return res.status(400).json({
+        success: false,
+        message: "eventId required",
+      });
+    }
+
+    const { Item: event } = await ddbDocClient.send(
+      new GetCommand({
+        TableName: EVENTS_TABLE,
+        Key: { eventId },
+      })
+    );
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const accessMode = event.accessMode || "freeAccess";
+
+    return res.status(200).json({
+      success: true,
+      accessMode,
+
+      requiresForm:
+        accessMode === "emailAccess" ||
+        accessMode === "passwordAccess" ||
+        accessMode === "paidAccess",
+
+      requiresPassword: accessMode === "passwordAccess",
+
+      registrationFields: event.registrationFields || [],
+
+      // ✅ FIXED
+      payment:
+        accessMode === "paidAccess"
+          ? {
+              amount: Number(event.paymentAmount || 0),
+              currency: event.currency || "USD",
+            }
+          : null,
+    });
+  } catch (err) {
+    console.error("getAccessConfig error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+}
+
+
+  /* =====================================================
+     REGISTER VIEWER
+  ===================================================== */
   static async registerViewer(req, res) {
     try {
       const { eventId } = req.params;
-      const { clientViewerId, formData, name, email, deviceInfo, ipAddress } = req.body || {};
+      const {
+        clientViewerId,
+        formData,
+        name,
+        email,
+        deviceInfo,
+        ipAddress,
+      } = req.body || {};
 
-      if (!eventId) return res.status(400).json({ success: false, message: "eventId required" });
+      if (!eventId || !clientViewerId) {
+        return res.status(400).json({
+          success: false,
+          message: "eventId and clientViewerId required",
+        });
+      }
 
-      // fetch event
       const { Item: event } = await ddbDocClient.send(
-        new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
       );
-      if (!event) return res.status(404).json({ success: false, message: "Event not found" });
 
-      // Build viewer record
-      const viewerToken = uuidv4(); // per-event token
+      if (!event) {
+        return res.status(404).json({
+          success: false,
+          message: "Event not found",
+        });
+      }
+
       const now = nowISO();
-      const accessType = (() => {
-        if (event.accessMode === "passwordAccess") return "password";
-        if (event.accessMode === "emailAccess") return "form";
-        if (event.accessMode === "paidAccess") return "form"; // payment handled separately
-        return "anonymous";
-      })();
-
-      const accessVerified = event.accessMode === "freeAccess"; // auto-verified for freeAccess
 
       const viewerItem = {
-        viewerToken,
         eventId,
-        clientViewerId: clientViewerId || null,
-        email: email || (formData && formData.email) || null,
-        name: name || (formData && formData.name) || null,
-        accessType,
+        clientViewerId,
+        email: email || formData?.email || null,
+        name: name || formData?.name || null,
         formData: formData || null,
+        accessVerified: event.accessMode === "freeAccess",
         isPaidViewer: false,
         paymentStatus: "none",
-        accessVerified: !!accessVerified,
         deviceType: deviceInfo?.deviceType || null,
         ipAddress: ipAddress || req.ip || null,
         firstJoinAt: now,
@@ -108,7 +212,7 @@ export default class PlaybackController {
         updatedAt: now,
       };
 
-      // store viewer
+      /* Overwrite allowed by design */
       await ddbDocClient.send(
         new PutCommand({
           TableName: VIEWERS_TABLE,
@@ -116,253 +220,221 @@ export default class PlaybackController {
         })
       );
 
-      // sign a token with minimal payload (viewerToken, eventId)
-      const token = signViewerToken({ viewerToken, eventId });
+      /* PASSWORD ACCESS → EMAIL PASSWORD */
+      if (event.accessMode === "passwordAccess") {
+        if (!email && !formData?.email) {
+          return res.status(400).json({
+            success: false,
+            message: "Email required for password access",
+          });
+        }
+
+        const plainPassword = uuidv4().slice(0, 8);
+        const passwordHash = await bcrypt.hash(plainPassword, 10);
+
+        await ddbDocClient.send(
+          new UpdateCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId },
+            UpdateExpression: "SET accessPassword = :p",
+            ExpressionAttributeValues: {
+              ":p": passwordHash,
+            },
+          })
+        );
+
+        await sendPasswordFromServer({
+          eventId,
+          clientViewerId,
+          email: email || formData?.email,
+          firstName: name,
+          password: plainPassword,
+          eventTitle: event.title,
+        });
+      }
+
+      const token = signViewerToken({
+        eventId,
+        clientViewerId,
+        isPaidViewer: false,
+      });
 
       return res.status(201).json({
         success: true,
         viewerToken: token,
-        eventId,
-        accessVerified,
+        accessVerified: viewerItem.accessVerified,
       });
     } catch (err) {
-      console.error("registerViewer error", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("registerViewer error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 
-  /**
-   * POST /api/playback/:eventId/verify-password
-   * Verify the event's single password (password sent to the user's email by admin or system).
-   * Body: { viewerToken, password }
-   */
+  /* =====================================================
+     VERIFY PASSWORD
+  ===================================================== */
   static async verifyPassword(req, res) {
     try {
       const { eventId } = req.params;
-      const { viewerToken, password } = req.body || {};
+      const { clientViewerId, password } = req.body || {};
 
-      if (!eventId || !viewerToken || !password)
-        return res.status(400).json({ success: false, message: "Missing parameters" });
+      if (!eventId || !clientViewerId || !password) {
+        return res.status(400).json({
+          success: false,
+          message: "Missing parameters",
+        });
+      }
 
-      // fetch event, ensure password exists
       const { Item: event } = await ddbDocClient.send(
-        new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
-      );
-      if (!event) return res.status(404).json({ success: false, message: "Event not found" });
-
-      if (event.accessMode !== "passwordAccess") {
-        return res.status(400).json({ success: false, message: "Event is not password protected" });
-      }
-      if (!event.accessPassword) {
-        return res.status(400).json({ success: false, message: "No password configured for this event" });
-      }
-
-      // fetch viewer record by viewerToken key (viewerToken is stored in DB)
-      const { Item: viewer } = await ddbDocClient.send(
-        new GetCommand({ TableName: VIEWERS_TABLE, Key: { viewerToken } })
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
       );
 
-      if (!viewer || viewer.eventId !== eventId) {
-        return res.status(404).json({ success: false, message: "Viewer record not found" });
+      if (!event || event.accessMode !== "passwordAccess") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid event access mode",
+        });
       }
 
-      // compare password against event.accessPassword (hashed)
-      const match = await bcrypt.compare(password, event.accessPassword);
-      if (!match) return res.status(401).json({ success: false, message: "Invalid password" });
+      const match = await bcrypt.compare(
+        password,
+        event.accessPassword
+      );
 
-      // mark viewer.accessVerified = true
+      if (!match) {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid password",
+        });
+      }
+
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: VIEWERS_TABLE,
-          Key: { viewerToken },
-          UpdateExpression: "SET accessVerified = :t, updatedAt = :u",
+          Key: { eventId, clientViewerId },
+          UpdateExpression:
+            "SET accessVerified = :t, updatedAt = :u",
           ExpressionAttributeValues: {
             ":t": true,
             ":u": nowISO(),
           },
-          ReturnValues: "UPDATED_NEW",
-        })
-      );
-
-      return res.status(200).json({ success: true, accessVerified: true });
-    } catch (err) {
-      console.error("verifyPassword error", err);
-      return res.status(500).json({ success: false, message: err.message });
-    }
-  }
-
-  /**
-   * GET /api/playback/:eventId/stream
-   * Requires viewerAuth middleware (verifies viewer token). Returns the stream URL if allowed.
-   */
-  static async getStream(req, res) {
-    try {
-      const { eventId } = req.params;
-      const viewerPayload = req.viewer; // from viewerAuth: { viewerToken, eventId, ... }
-
-      if (!eventId) return res.status(400).json({ success: false, message: "Missing eventId" });
-      if (!viewerPayload) return res.status(401).json({ success: false, message: "Missing viewer token" });
-
-      const { viewerToken } = viewerPayload;
-
-      // fetch viewer
-      const { Item: viewer } = await ddbDocClient.send(
-        new GetCommand({ TableName: VIEWERS_TABLE, Key: { viewerToken } })
-      );
-
-      if (!viewer || viewer.eventId !== eventId) {
-        return res.status(403).json({ success: false, message: "Viewer not authorized for this event" });
-      }
-
-      // load event
-      const { Item: event } = await ddbDocClient.send(
-        new GetCommand({ TableName: EVENTS_TABLE, Key: { eventId } })
-      );
-      if (!event) return res.status(404).json({ success: false, message: "Event not found" });
-
-      // check paidAccess
-      if (event.accessMode === "paidAccess" && !viewer.isPaidViewer) {
-        return res.status(402).json({ success: false, message: "Payment required" });
-      }
-
-      // check accessVerified (for password/email)
-      if ((event.accessMode === "passwordAccess" || event.accessMode === "emailAccess") && !viewer.accessVerified) {
-        return res.status(403).json({ success: false, message: "Viewer has not completed registration/verification" });
-      }
-
-      // derive stream URL: prefer CloudFront / mediaPackage / vod urls
-      const streamUrl =
-        event.cloudFrontUrl ||
-        event.mediaPackageUrl ||
-        event.vodCloudFrontUrl ||
-        event.vod1080pUrl ||
-        event.liveUrl ||
-        event.vodUrl ||
-        null;
-
-      if (!streamUrl) {
-        return res.status(503).json({ success: false, message: "Stream URL not configured" });
-      }
-
-      // update viewer lastJoinAt
-      await ddbDocClient.send(
-        new UpdateCommand({
-          TableName: VIEWERS_TABLE,
-          Key: { viewerToken },
-          UpdateExpression: "SET lastJoinAt = :t, updatedAt = :t",
-          ExpressionAttributeValues: { ":t": nowISO() },
         })
       );
 
       return res.status(200).json({
         success: true,
-        streamUrl,
-        eventType: event.eventType || "live",
+        accessVerified: true,
       });
     } catch (err) {
-      console.error("getStream error", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("verifyPassword error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 
-  /**
-   * POST /api/playback/:eventId/session
-   * Log session start/end for analytics.
-   * Body: { action: "start"|"end", sessionId?, viewerToken, deviceInfo?, ipAddress?, endTime?, duration? }
-   */
-  static async logSession(req, res) {
+  /* =====================================================
+     GET STREAM
+  ===================================================== */
+  static async getStream(req, res) {
     try {
       const { eventId } = req.params;
-      const { action, sessionId, viewerToken, deviceInfo, ipAddress, endTime, duration } = req.body || {};
+      const { eventId: tokenEventId, clientViewerId } = req.viewer;
 
-      if (!eventId || !action) return res.status(400).json({ success: false, message: "eventId and action required" });
-      if (!viewerToken) return res.status(400).json({ success: false, message: "viewerToken required" });
-
-      if (action === "start") {
-        const sid = sessionId || uuidv4();
-        const now = nowISO();
-
-        // write session
-        await ddbDocClient.send(
-          new PutCommand({
-            TableName: SESSIONS_TABLE,
-            Item: {
-              sessionId: sid,
-              eventId,
-              viewerToken,
-              startTime: now,
-              endTime: null,
-              duration: 0,
-              playbackType: "live", // frontend may pass different
-              deviceInfo: deviceInfo || null,
-              ipAddress: ipAddress || req.ip || null,
-              createdAt: now,
-            },
-          })
-        );
-
-        // increment viewer.totalSessions and update lastJoinAt
-        await ddbDocClient.send(
-          new UpdateCommand({
-            TableName: VIEWERS_TABLE,
-            Key: { viewerToken },
-            UpdateExpression: "SET lastJoinAt = :t, totalSessions = if_not_exists(totalSessions, :zero) + :inc, updatedAt = :t",
-            ExpressionAttributeValues: { ":t": nowISO(), ":inc": 1, ":zero": 0 },
-          })
-        );
-
-        return res.status(201).json({ success: true, sessionId: sid });
+      if (eventId !== tokenEventId) {
+        return res.status(403).json({
+          success: false,
+          message: "Event mismatch",
+        });
       }
 
-      if (action === "end") {
-        if (!sessionId) return res.status(400).json({ success: false, message: "sessionId required for end" });
+      const { Item: viewer } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: VIEWERS_TABLE,
+          Key: { eventId, clientViewerId },
+        })
+      );
 
-        // update session end/time/duration
-        const end = endTime || nowISO();
-        const dur = typeof duration === "number" ? duration : null;
-
-        // patch session (simple put-style: update fields)
-        const updateExp = [
-          "SET endTime = :end",
-          "updatedAt = :u"
-        ];
-        const attr = { ":end": end, ":u": nowISO() };
-
-        if (dur !== null) {
-          updateExp.push("duration = if_not_exists(duration, :zero) + :d");
-          attr[":d"] = dur;
-          attr[":zero"] = 0;
-        }
-
-        await ddbDocClient.send(
-          new UpdateCommand({
-            TableName: SESSIONS_TABLE,
-            Key: { sessionId },
-            UpdateExpression: updateExp.join(", "),
-            ExpressionAttributeValues: attr,
-          })
-        );
-
-        // increment viewer totalWatchTime
-        if (dur !== null) {
-          await ddbDocClient.send(
-            new UpdateCommand({
-              TableName: VIEWERS_TABLE,
-              Key: { viewerToken },
-              UpdateExpression: "SET totalWatchTime = if_not_exists(totalWatchTime, :zero) + :d, updatedAt = :u",
-              ExpressionAttributeValues: { ":d": dur, ":zero": 0, ":u": nowISO() },
-            })
-          );
-        }
-
-        return res.status(200).json({ success: true });
+      if (!viewer) {
+        return res.status(403).json({
+          success: false,
+          message: "Viewer not authorized",
+        });
       }
 
-      return res.status(400).json({ success: false, message: "Unknown action" });
+      const { Item: event } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
+      );
+
+      if (!event) {
+        return res.status(404).json({
+          success: false,
+          message: "Event not found",
+        });
+      }
+
+      /* ACCESS ENFORCEMENT */
+      if (
+        (event.accessMode === "emailAccess" ||
+          event.accessMode === "passwordAccess") &&
+        !viewer.accessVerified
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Access not verified",
+        });
+      }
+
+      if (event.accessMode === "paidAccess" && !viewer.isPaidViewer) {
+        return res.status(402).json({
+          success: false,
+          message: "Payment required",
+        });
+      }
+
+      const resolved = resolveStreamUrl(event);
+
+      if (resolved.blocked) {
+        return res.status(403).json({
+          success: false,
+          message: resolved.reason,
+        });
+      }
+
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: VIEWERS_TABLE,
+          Key: { eventId, clientViewerId },
+          UpdateExpression:
+            "SET lastJoinAt = :t, updatedAt = :t",
+          ExpressionAttributeValues: {
+            ":t": nowISO(),
+          },
+        })
+      );
+
+      return res.status(200).json({
+        success: true,
+        streamUrl: resolved.streamUrl,
+        playbackType: resolved.playbackType,
+        eventType: event.eventType,
+      });
     } catch (err) {
-      console.error("logSession error", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("getStream error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
-
 }

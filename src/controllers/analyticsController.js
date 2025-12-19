@@ -6,38 +6,53 @@ import {
 } from "../config/awsClients.js";
 import { v4 as uuidv4 } from "uuid";
 
-const ANALYTICS_TABLE = process.env.ANALYTICS_TABLE || "go-live-analytics";
-const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
+const ANALYTICS_TABLE =
+  process.env.ANALYTICS_TABLE || "go-live-analytics";
 
 const nowISO = () => new Date().toISOString();
 
 export default class AnalyticsController {
 
   /* ============================================================
-     1. START SESSION  (viewer)
+     1. START SESSION (Viewer)
      ============================================================ */
   static async startSession(req, res) {
     try {
       const { eventId } = req.params;
       const viewer = req.viewer;
 
-      if (!viewer) {
-        return res.status(401).json({ success: false, message: "Viewer unauthorized" });
+      if (!viewer || viewer.eventId !== eventId) {
+        return res.status(401).json({
+          success: false,
+          message: "Viewer unauthorized for this event",
+        });
       }
 
       const sessionId = uuidv4();
 
       const item = {
-        sessionId,
-        eventId,
-        viewerId: viewer.viewerId,
+        sessionId,                     // PK
+        eventId,                       // GSI
+        viewerToken: viewer.viewerToken,
+        clientViewerId: viewer.clientViewerId,
+
         playbackType: req.body.playbackType || "vod",
+
+        // Session-specific metadata
         deviceInfo: req.body.deviceInfo || {},
         location: req.body.location || {},
-        ipAddress: req.ip,
+
+        // Trusted server-side IP
+        ipAddress:
+          req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+          req.socket.remoteAddress ||
+          null,
+
+
         startTime: nowISO(),
         endTime: null,
         duration: 0,
+
         createdAt: nowISO(),
       };
 
@@ -48,31 +63,45 @@ export default class AnalyticsController {
         })
       );
 
-      return res.status(200).json({ success: true, sessionId });
+      return res.status(201).json({
+        success: true,
+        sessionId,
+      });
+
     } catch (err) {
       console.error("startSession error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to start analytics session",
+      });
     }
   }
 
   /* ============================================================
-     2. END SESSION  (viewer)
+     2. END SESSION (Viewer)
      ============================================================ */
   static async endSession(req, res) {
     try {
       const { sessionId, duration } = req.body;
 
-      if (!sessionId)
-        return res.status(400).json({ success: false, message: "sessionId required" });
+      if (!sessionId) {
+        return res.status(400).json({
+          success: false,
+          message: "sessionId required",
+        });
+      }
 
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: ANALYTICS_TABLE,
           Key: { sessionId },
-          UpdateExpression: "set endTime = :end, duration = :dur",
+          UpdateExpression: "SET endTime = :end, #d = :dur",
+          ExpressionAttributeNames: {
+            "#d": "duration",
+          },
           ExpressionAttributeValues: {
             ":end": nowISO(),
-            ":dur": duration || 0,
+            ":dur": Number(duration) || 0,
           },
         })
       );
@@ -80,27 +109,40 @@ export default class AnalyticsController {
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error("endSession error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to end session",
+      });
     }
   }
 
+
   /* ============================================================
-     3. HEARTBEAT (viewer)
+     3. HEARTBEAT (Viewer)
      ============================================================ */
   static async heartbeat(req, res) {
     try {
       const { sessionId, seconds } = req.body;
 
-      if (!sessionId)
-        return res.status(400).json({ success: false, message: "sessionId required" });
+      if (!sessionId) {
+        return res.status(400).json({
+          success: false,
+          message: "sessionId required",
+        });
+      }
+
+      const increment = Math.max(0, Number(seconds) || 0);
 
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: ANALYTICS_TABLE,
           Key: { sessionId },
-          UpdateExpression: "ADD duration :sec",
+          UpdateExpression: "ADD #d :sec",
+          ExpressionAttributeNames: {
+            "#d": "duration",
+          },
           ExpressionAttributeValues: {
-            ":sec": Number(seconds) || 0,
+            ":sec": increment,
           },
         })
       );
@@ -108,12 +150,16 @@ export default class AnalyticsController {
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error("heartbeat error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update heartbeat",
+      });
     }
   }
 
+
   /* ============================================================
-     4. ADMIN — SUMMARY API (Required by your swagger)
+     4. ADMIN — EVENT SUMMARY
      ============================================================ */
   static async getEventSummary(req, res) {
     try {
@@ -131,8 +177,10 @@ export default class AnalyticsController {
       const sessions = raw.Items || [];
 
       const totalSessions = sessions.length;
-      const totalWatchTime = sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
-      const avgWatch = totalSessions ? totalWatchTime / totalSessions : 0;
+      const totalWatchTime = sessions.reduce(
+        (sum, s) => sum + (s.duration || 0),
+        0
+      );
 
       return res.status(200).json({
         success: true,
@@ -140,18 +188,23 @@ export default class AnalyticsController {
         summary: {
           totalSessions,
           totalWatchTime,
-          avgWatchTime: avgWatch,
+          avgWatchTime: totalSessions
+            ? Math.round(totalWatchTime / totalSessions)
+            : 0,
         },
       });
 
     } catch (err) {
       console.error("getEventSummary error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch event summary",
+      });
     }
   }
 
   /* ============================================================
-     5. ADMIN — RECENT SESSIONS API (Required by your swagger)
+     5. ADMIN — RECENT SESSIONS
      ============================================================ */
   static async getRecentSessions(req, res) {
     try {
@@ -176,8 +229,10 @@ export default class AnalyticsController {
 
     } catch (err) {
       console.error("getRecentSessions error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch recent sessions",
+      });
     }
   }
-
 }

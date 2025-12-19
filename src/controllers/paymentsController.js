@@ -1,171 +1,258 @@
-// src/controllers/paymentsController.js
 import {
   ddbDocClient,
   PutCommand,
   UpdateCommand,
   GetCommand,
   QueryCommand,
-  ScanCommand
 } from "../config/awsClients.js";
 
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
 
+/* =========================================================
+   STRIPE
+========================================================= */
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE || "go-live-payments";
-const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
-const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
+/* =========================================================
+   TABLES
+========================================================= */
+const PAYMENTS_TABLE =
+  process.env.PAYMENTS_TABLE || "go-live-payments";
+
+const EVENTS_TABLE =
+  process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
+
+const VIEWERS_TABLE =
+  process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
+
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || "http://localhost:5173";
 
 const nowISO = () => new Date().toISOString();
 
+/* =========================================================
+   PAYMENTS CONTROLLER
+========================================================= */
 export default class PaymentsController {
 
-  // ==========================================================
-  // 1. CREATE STRIPE CHECKOUT SESSION (Viewer)
-  // ==========================================================
+  /* ======================================================
+     1️⃣ CREATE STRIPE CHECKOUT SESSION (VIEWER)
+     ====================================================== */
   static async createSession(req, res) {
     try {
       const { eventId } = req.params;
       const viewer = req.viewer;
 
-      if (!viewer?.viewerId) {
-        return res.status(401).json({ message: "Invalid viewer token" });
+      if (!viewer?.clientViewerId) {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid viewer token",
+        });
       }
 
-      // Fetch event
-      const eventData = await ddbDocClient.send(
+      /* ---------- Fetch Event ---------- */
+      const { Item: event } = await ddbDocClient.send(
         new GetCommand({
           TableName: EVENTS_TABLE,
-          Key: { eventId }
+          Key: { eventId },
         })
       );
 
-      const event = eventData.Item;
-      if (!event) return res.status(404).json({ message: "Event not found" });
-
-      if (event.accessMode !== "paidAccess") {
-        return res.status(400).json({ message: "Event is not paid" });
+      if (!event) {
+        return res.status(404).json({
+          success: false,
+          message: "Event not found",
+        });
       }
 
+      if (event.accessMode !== "paidAccess") {
+        return res.status(400).json({
+          success: false,
+          message: "Event is not a paid event",
+        });
+      }
+
+      if (
+        typeof event.paymentAmount !== "number" ||
+        !event.currency
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Payment configuration missing",
+        });
+      }
+
+      /* ---------- Create Payment ---------- */
       const paymentId = uuidv4();
-      const amount = Number(event.paymentAmount) * 100;
+      const createdAt = nowISO();
+      const amountInMinorUnits = Math.round(event.paymentAmount * 100);
 
-      // Create Stripe Checkout session
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card"],
-        mode: "payment",
-        line_items: [
-          {
-            price_data: {
-              currency: event.currency,
-              product_data: { name: event.title },
-              unit_amount: amount
+      const session = await stripe.checkout.sessions.create(
+        {
+          payment_method_types: ["card"],
+          mode: "payment",
+          line_items: [
+            {
+              price_data: {
+                currency: event.currency,
+                product_data: {
+                  name: event.title || "Event Access",
+                },
+                unit_amount: amountInMinorUnits,
+              },
+              quantity: 1,
             },
-            quantity: 1
-          }
-        ],
-        metadata: {
-          paymentId,
-          viewerId: viewer.viewerId,
-          eventId
+          ],
+          metadata: {
+            paymentId,
+            eventId,
+            clientViewerId: viewer.clientViewerId,
+            createdAt,
+          },
+          success_url: `${FRONTEND_URL}/event/${eventId}/payment-success`,
+          cancel_url: `${FRONTEND_URL}/event/${eventId}/payment-cancel`,
         },
-        success_url: `${process.env.FRONTEND_URL}/event/${eventId}/payment-success`,
-        cancel_url: `${process.env.FRONTEND_URL}/event/${eventId}/payment-cancel`
-      });
+        {
+          idempotencyKey: paymentId,
+        }
+      );
 
-      // Save DB entry
+      /* ---------- Persist Payment ---------- */
       await ddbDocClient.send(
         new PutCommand({
           TableName: PAYMENTS_TABLE,
           Item: {
             paymentId,
+            createdAt,
             eventId,
-            viewerId: viewer.viewerId,
+            clientViewerId: viewer.clientViewerId,
             amount: event.paymentAmount,
             currency: event.currency,
             status: "created",
             stripeCheckoutSessionId: session.id,
             stripePaymentIntentId: null,
             receiptUrl: null,
-            createdAt: nowISO(),
-            updatedAt: nowISO()
-          }
+            updatedAt: createdAt,
+          },
         })
       );
 
       return res.status(200).json({
         success: true,
         sessionId: session.id,
-        url: session.url
+        url: session.url,
       });
 
     } catch (err) {
-      console.error("Stripe session error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("createSession error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 
-  // ==========================================================
-  // 2. STRIPE WEBHOOK (Server)
-  // ==========================================================
+  /* ======================================================
+     2️⃣ STRIPE WEBHOOK (SERVER ONLY)
+     ====================================================== */
   static async webhook(req, res) {
+    let stripeEvent;
+
     try {
       const signature = req.headers["stripe-signature"];
-      let event;
 
-      try {
-        event = stripe.webhooks.constructEvent(
-          req.rawBody,
-          signature,
-          process.env.STRIPE_WEBHOOK_SECRET
-        );
-      } catch (err) {
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-      }
+      stripeEvent = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error("Webhook signature verification failed:", err);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
 
-      if (event.type === "checkout.session.completed") {
-        const data = event.data.object;
+    try {
+      if (stripeEvent.type === "checkout.session.completed") {
+        const session = stripeEvent.data.object;
 
-        const paymentId = data.metadata.paymentId;
-        const viewerId = data.metadata.viewerId;
-        const eventId = data.metadata.eventId;
+        const {
+          paymentId,
+          eventId,
+          clientViewerId,
+          createdAt,
+        } = session.metadata || {};
 
-        const intentId = data.payment_intent;
+        if (!paymentId || !createdAt) {
+          console.warn("Webhook missing metadata");
+          return res.status(200).json({ received: true });
+        }
 
-        // Retrieve receipt
-        const intent = await stripe.paymentIntents.retrieve(intentId);
-        const receiptUrl = intent?.charges?.data?.[0]?.receipt_url || null;
-
-        // Update payment record
-        await ddbDocClient.send(
-          new UpdateCommand({
+        /* ---------- Idempotency Check ---------- */
+        const existing = await ddbDocClient.send(
+          new QueryCommand({
             TableName: PAYMENTS_TABLE,
-            Key: { paymentId },
-            UpdateExpression:
-              "SET status = :s, stripePaymentIntentId = :pi, receiptUrl = :r, updatedAt = :u",
+            KeyConditionExpression: "paymentId = :pid",
             ExpressionAttributeValues: {
-              ":s": "succeeded",
-              ":pi": intentId,
-              ":r": receiptUrl,
-              ":u": nowISO()
-            }
+              ":pid": paymentId,
+            },
+            Limit: 1,
           })
         );
 
-        // Update viewer record → mark paid
+        const payment = existing.Items?.[0];
+        if (!payment || payment.status === "succeeded") {
+          return res.status(200).json({ received: true });
+        }
+
+        /* ---------- Fetch Receipt ---------- */
+        let receiptUrl = null;
+        if (session.payment_intent) {
+          const intent = await stripe.paymentIntents.retrieve(
+            session.payment_intent
+          );
+          receiptUrl =
+            intent?.charges?.data?.[0]?.receipt_url || null;
+        }
+
+        /* ---------- Update Payment ---------- */
+        await ddbDocClient.send(
+          new UpdateCommand({
+            TableName: PAYMENTS_TABLE,
+            Key: {
+              paymentId,
+              createdAt: payment.createdAt,
+            },
+            UpdateExpression:
+              "SET #s = :s, stripePaymentIntentId = :pi, receiptUrl = :r, updatedAt = :u",
+            ExpressionAttributeNames: {
+              "#s": "status",
+            },
+            ExpressionAttributeValues: {
+              ":s": "succeeded",
+              ":pi": session.payment_intent,
+              ":r": receiptUrl,
+              ":u": nowISO(),
+            },
+          })
+        );
+
+        /* ---------- Grant Viewer Access ---------- */
         await ddbDocClient.send(
           new UpdateCommand({
             TableName: VIEWERS_TABLE,
-            Key: { eventId, clientViewerId: viewerId },
+            Key: {
+              eventId,
+              clientViewerId,
+            },
             UpdateExpression:
               "SET isPaidViewer = :p, paymentStatus = :ps, lastPaymentId = :pid, updatedAt = :u",
             ExpressionAttributeValues: {
               ":p": true,
               ":ps": "success",
               ":pid": paymentId,
-              ":u": nowISO()
-            }
+              ":u": nowISO(),
+            },
           })
         );
       }
@@ -173,52 +260,58 @@ export default class PaymentsController {
       return res.status(200).json({ received: true });
 
     } catch (err) {
-      console.error("Webhook handler error:", err);
+      console.error("Webhook processing error:", err);
       return res.status(500).json({ error: err.message });
     }
   }
 
-  // ==========================================================
-  // 3. CHECK PAYMENT STATUS (Viewer)
-  // ==========================================================
+  /* ======================================================
+     3️⃣ CHECK PAYMENT STATUS (VIEWER)
+     ====================================================== */
   static async checkStatus(req, res) {
     try {
-      const viewer = req.viewer;
       const { eventId } = req.params;
+      const viewer = req.viewer;
 
-      if (!viewer) {
-        return res.status(401).json({ success: false, message: "Invalid token" });
+      if (!viewer?.clientViewerId) {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid viewer token",
+        });
       }
 
-      // Query payment history
       const result = await ddbDocClient.send(
         new QueryCommand({
           TableName: PAYMENTS_TABLE,
-          IndexName: "eventId-viewerId-index",
-          KeyConditionExpression: "eventId = :e AND viewerId = :v",
+          IndexName: "eventId-clientViewerId-index",
+          KeyConditionExpression:
+            "eventId = :e AND clientViewerId = :v",
           ExpressionAttributeValues: {
             ":e": eventId,
-            ":v": viewer.viewerId
+            ":v": viewer.clientViewerId,
           },
           ScanIndexForward: false,
-          Limit: 1
+          Limit: 1,
         })
       );
 
       return res.status(200).json({
         success: true,
-        payment: result.Items?.[0] || null
+        payment: result.Items?.[0] || null,
       });
 
     } catch (err) {
-      console.error("Payment check error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("checkStatus error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 
-  // ==========================================================
-  // 4. ADMIN — LIST PAYMENTS FOR EVENT
-  // ==========================================================
+  /* ======================================================
+     4️⃣ ADMIN — LIST PAYMENTS FOR EVENT
+     ====================================================== */
   static async listForEvent(req, res) {
     try {
       const { eventId } = req.params;
@@ -228,43 +321,61 @@ export default class PaymentsController {
           TableName: PAYMENTS_TABLE,
           IndexName: "eventId-index",
           KeyConditionExpression: "eventId = :e",
-          ExpressionAttributeValues: { ":e": eventId }
+          ExpressionAttributeValues: {
+            ":e": eventId,
+          },
         })
       );
 
       return res.status(200).json({
         success: true,
-        payments: result.Items || []
+        payments: result.Items || [],
       });
 
     } catch (err) {
-      console.error("List payments error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("listForEvent error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 
-  // ==========================================================
-  // 5. ADMIN — GET PAYMENT DETAIL
-  // ==========================================================
+  /* ======================================================
+     5️⃣ ADMIN — GET PAYMENT DETAIL
+     ====================================================== */
   static async getPayment(req, res) {
     try {
-      const { paymentId } = req.params;
+      const { paymentId, createdAt } = req.params;
+
+      if (!paymentId || !createdAt) {
+        return res.status(400).json({
+          success: false,
+          message: "paymentId and createdAt required",
+        });
+      }
 
       const record = await ddbDocClient.send(
         new GetCommand({
           TableName: PAYMENTS_TABLE,
-          Key: { paymentId }
+          Key: {
+            paymentId,
+            createdAt,
+          },
         })
       );
 
       return res.status(200).json({
         success: true,
-        payment: record.Item || null
+        payment: record.Item || null,
       });
 
     } catch (err) {
-      console.error("Get payment error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      console.error("getPayment error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
   }
 }

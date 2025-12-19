@@ -1,11 +1,9 @@
 import { ddbDocClient, GetCommand } from "../config/awsClients.js";
+import { verifyViewerToken } from "../utils/viewerJwt.js";
 
-const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
+const VIEWERS_TABLE =
+  process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
 
-/**
- * Viewer Authentication Middleware
- * Validates viewerToken stored in DynamoDB (NOT JWT)
- */
 export default async function viewerAuth(req, res, next) {
   try {
     const header =
@@ -13,42 +11,68 @@ export default async function viewerAuth(req, res, next) {
       req.headers["x-viewer-token"];
 
     if (!header) {
-      return res.status(401).json({ success: false, message: "Viewer token required" });
-    }
-
-    const token = header.replace("Bearer ", "").replace("ViewerToken ", "").trim();
-
-    if (!token) {
-      return res.status(401).json({ success: false, message: "Invalid viewer token" });
-    }
-
-    // ---- Direct PK lookup ----
-    const result = await ddbDocClient.send(
-      new GetCommand({
-        TableName: VIEWERS_TABLE,
-        Key: { viewerToken: token }
-      })
-    );
-
-    if (!result.Item) {
       return res.status(401).json({
         success: false,
-        message: "Viewer token not found"
+        message: "Viewer token required"
       });
     }
 
-    const viewer = result.Item;
+    const rawToken = header
+      .replace("Bearer ", "")
+      .trim();
 
-    // ---- OPTIONAL TOKEN EXPIRY SUPPORT ----
-    if (viewer.tokenExpiresAt && new Date(viewer.tokenExpiresAt) < new Date()) {
-      return res.status(401).json({ success: false, message: "Viewer token expired" });
+    // 1️⃣ Verify JWT
+    let payload;
+    try {
+      payload = verifyViewerToken(rawToken);
+    } catch {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired viewer token"
+      });
     }
 
-    req.viewer = viewer;
-    return next();
+    const { eventId, clientViewerId } = payload;
 
+    if (!eventId || !clientViewerId) {
+      return res.status(401).json({
+        success: false,
+        message: "Malformed viewer token"
+      });
+    }
+
+    // 2️⃣ DynamoDB lookup using PK + SK
+    const { Item } = await ddbDocClient.send(
+      new GetCommand({
+        TableName: VIEWERS_TABLE,
+        Key: {
+          eventId,
+          clientViewerId
+        }
+      })
+    );
+
+    if (!Item) {
+      return res.status(401).json({
+        success: false,
+        message: "Viewer not authorized"
+      });
+    }
+
+    // 3️⃣ Attach minimal viewer context
+    req.viewer = {
+      eventId,
+      clientViewerId,
+      accessVerified: Item.accessVerified,
+      isPaidViewer: Item.isPaidViewer
+    };
+
+    return next();
   } catch (err) {
     console.error("viewerAuth error:", err);
-    return res.status(500).json({ success: false, message: "Viewer authentication failed" });
+    return res.status(500).json({
+      success: false,
+      message: "Viewer authentication failed"
+    });
   }
 }
