@@ -155,190 +155,205 @@ static async getAccessConfig(req, res) {
 }
 
 
+
+
+
   /* =====================================================
      REGISTER VIEWER
   ===================================================== */
-  static async registerViewer(req, res) {
-    try {
-      const { eventId } = req.params;
-      const {
-        clientViewerId,
-        formData,
-        name,
-        email,
-        deviceInfo,
-        ipAddress,
-      } = req.body || {};
+static async registerViewer(req, res) {
+  try {
+    const { eventId } = req.params;
+    const {
+      clientViewerId,
+      formData,
+      name,
+      email,
+      deviceInfo,
+      ipAddress,
+    } = req.body || {};
 
-      if (!eventId || !clientViewerId) {
-        return res.status(400).json({
-          success: false,
-          message: "eventId and clientViewerId required",
-        });
-      }
-
-      const { Item: event } = await ddbDocClient.send(
-        new GetCommand({
-          TableName: EVENTS_TABLE,
-          Key: { eventId },
-        })
-      );
-
-      if (!event) {
-        return res.status(404).json({
-          success: false,
-          message: "Event not found",
-        });
-      }
-
-      const now = nowISO();
-
-      const viewerItem = {
-        eventId,
-        clientViewerId,
-        email: email || formData?.email || null,
-        name: name || formData?.name || null,
-        formData: formData || null,
-        accessVerified: event.accessMode === "freeAccess",
-        isPaidViewer: false,
-        paymentStatus: "none",
-        deviceType: deviceInfo?.deviceType || null,
-        ipAddress: ipAddress || req.ip || null,
-        firstJoinAt: now,
-        lastJoinAt: now,
-        totalSessions: 0,
-        totalWatchTime: 0,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      /* Overwrite allowed by design */
-      await ddbDocClient.send(
-        new PutCommand({
-          TableName: VIEWERS_TABLE,
-          Item: viewerItem,
-        })
-      );
-
-      /* PASSWORD ACCESS → EMAIL PASSWORD */
-      if (event.accessMode === "passwordAccess") {
-        if (!email && !formData?.email) {
-          return res.status(400).json({
-            success: false,
-            message: "Email required for password access",
-          });
-        }
-
-        const plainPassword = uuidv4().slice(0, 8);
-        const passwordHash = await bcrypt.hash(plainPassword, 10);
-
-        await ddbDocClient.send(
-          new UpdateCommand({
-            TableName: EVENTS_TABLE,
-            Key: { eventId },
-            UpdateExpression: "SET accessPassword = :p",
-            ExpressionAttributeValues: {
-              ":p": passwordHash,
-            },
-          })
-        );
-
-        await sendPasswordFromServer({
-          eventId,
-          clientViewerId,
-          email: email || formData?.email,
-          firstName: name,
-          password: plainPassword,
-          eventTitle: event.title,
-        });
-      }
-
-      const token = signViewerToken({
-        eventId,
-        clientViewerId,
-        isPaidViewer: false,
-      });
-
-      return res.status(201).json({
-        success: true,
-        viewerToken: token,
-        accessVerified: viewerItem.accessVerified,
-      });
-    } catch (err) {
-      console.error("registerViewer error:", err);
-      return res.status(500).json({
+    // ---------------- BASIC VALIDATION ----------------
+    if (!eventId || !clientViewerId) {
+      return res.status(400).json({
         success: false,
-        message: err.message,
+        message: "eventId and clientViewerId required",
       });
     }
+
+    // ---------------- FETCH EVENT ----------------
+    const { Item: event } = await ddbDocClient.send(
+      new GetCommand({
+        TableName: EVENTS_TABLE,
+        Key: { eventId },
+      })
+    );
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const now = nowISO();
+
+    // ---------------- ACCESS RULES ----------------
+    // Free + Email access = immediate playback
+    const accessVerified =
+      event.accessMode === "freeAccess" ||
+      event.accessMode === "emailAccess";
+
+    // ---------------- BUILD VIEWER ITEM ----------------
+    const viewerItem = {
+      eventId,
+      clientViewerId,
+      email: email || formData?.email || null,
+      name: name || formData?.name || null,
+      formData: formData || null,
+
+      accessVerified,
+      isPaidViewer: false,
+      paymentStatus: "none",
+
+      deviceType: deviceInfo?.deviceType || null,
+      ipAddress: ipAddress || req.ip || null,
+
+      firstJoinAt: now,
+      lastJoinAt: now,
+      totalSessions: 0,
+      totalWatchTime: 0,
+
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // ---------------- SAVE / OVERWRITE VIEWER ----------------
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: VIEWERS_TABLE,
+        Item: viewerItem,
+      })
+    );
+
+    // ---------------- PASSWORD ACCESS → EMAIL SAME EVENT PASSWORD ----------------
+    if (event.accessMode === "passwordAccess") {
+      const targetEmail = email || formData?.email;
+
+      if (!targetEmail) {
+        return res.status(400).json({
+          success: false,
+          message: "Email required for password access",
+        });
+      }
+
+      if (!event.accessPassword) {
+        return res.status(500).json({
+          success: false,
+          message: "Event password not configured",
+        });
+      }
+
+      await sendPasswordFromServer({
+        eventId,
+        email: targetEmail,
+        firstName: name || "",
+        password: event.accessPassword, // SAME PASSWORD FOR ALL
+        eventTitle: event.title,
+      });
+    }
+
+    // ---------------- ISSUE VIEWER TOKEN ----------------
+    const token = signViewerToken({
+      eventId,
+      clientViewerId,
+      isPaidViewer: false,
+    });
+
+    // ---------------- RESPONSE ----------------
+    return res.status(201).json({
+      success: true,
+      viewerToken: token,
+      accessVerified,
+      accessMode: event.accessMode,
+    });
+  } catch (err) {
+    console.error("registerViewer error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
+}
+
 
   /* =====================================================
      VERIFY PASSWORD
   ===================================================== */
-  static async verifyPassword(req, res) {
-    try {
-      const { eventId } = req.params;
-      const { clientViewerId, password } = req.body || {};
+static async verifyPassword(req, res) {
+  try {
+    const { eventId } = req.params;
+    const { clientViewerId, password } = req.body || {};
 
-      if (!eventId || !clientViewerId || !password) {
-        return res.status(400).json({
-          success: false,
-          message: "Missing parameters",
-        });
-      }
-
-      const { Item: event } = await ddbDocClient.send(
-        new GetCommand({
-          TableName: EVENTS_TABLE,
-          Key: { eventId },
-        })
-      );
-
-      if (!event || event.accessMode !== "passwordAccess") {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid event access mode",
-        });
-      }
-
-      const match = await bcrypt.compare(
-        password,
-        event.accessPassword
-      );
-
-      if (!match) {
-        return res.status(401).json({
-          success: false,
-          message: "Invalid password",
-        });
-      }
-
-      await ddbDocClient.send(
-        new UpdateCommand({
-          TableName: VIEWERS_TABLE,
-          Key: { eventId, clientViewerId },
-          UpdateExpression:
-            "SET accessVerified = :t, updatedAt = :u",
-          ExpressionAttributeValues: {
-            ":t": true,
-            ":u": nowISO(),
-          },
-        })
-      );
-
-      return res.status(200).json({
-        success: true,
-        accessVerified: true,
-      });
-    } catch (err) {
-      console.error("verifyPassword error:", err);
-      return res.status(500).json({
+    // ---------------- BASIC VALIDATION ----------------
+    if (!eventId || !clientViewerId || !password) {
+      return res.status(400).json({
         success: false,
-        message: err.message,
+        message: "Missing parameters",
       });
     }
+
+    // ---------------- FETCH EVENT ----------------
+    const { Item: event } = await ddbDocClient.send(
+      new GetCommand({
+        TableName: EVENTS_TABLE,
+        Key: { eventId },
+      })
+    );
+
+    if (!event || event.accessMode !== "passwordAccess") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid event access mode",
+      });
+    }
+
+    // ---------------- PASSWORD CHECK (PLAIN TEXT) ----------------
+    if (password !== event.accessPassword) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid password",
+      });
+    }
+
+    // ---------------- MARK VIEWER AS VERIFIED ----------------
+    await ddbDocClient.send(
+      new UpdateCommand({
+        TableName: VIEWERS_TABLE,
+        Key: { eventId, clientViewerId },
+        UpdateExpression:
+          "SET accessVerified = :t, updatedAt = :u",
+        ExpressionAttributeValues: {
+          ":t": true,
+          ":u": nowISO(),
+        },
+      })
+    );
+
+    // ---------------- RESPONSE ----------------
+    return res.status(200).json({
+      success: true,
+      accessVerified: true,
+    });
+  } catch (err) {
+    console.error("verifyPassword error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
+}
+
 
   /* =====================================================
      GET STREAM

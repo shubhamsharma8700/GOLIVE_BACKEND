@@ -2,17 +2,21 @@
 import jwt from "jsonwebtoken";
 
 const VIEWER_JWT_SECRET =
-  process.env.VIEWER_JWT_SECRET || "replace_this_secret";
+  process.env.VIEWER_JWT_SECRET || "golive-viewer-secret";
 const VIEWER_JWT_EXP =
   process.env.VIEWER_JWT_EXP || "7d";
 
-export function signViewerToken({ eventId, clientViewerId }) {
+export function signViewerToken({ eventId, clientViewerId, isPaidViewer }) {
   if (!eventId || !clientViewerId) {
-    throw new Error("eventId and clientViewerId required for viewer token");
+    throw new Error("eventId and clientViewerId required");
   }
 
   return jwt.sign(
-    { eventId, clientViewerId },
+    {
+      eventId,
+      clientViewerId,
+      isPaidViewer: Boolean(isPaidViewer),
+    },
     VIEWER_JWT_SECRET,
     { expiresIn: VIEWER_JWT_EXP }
   );

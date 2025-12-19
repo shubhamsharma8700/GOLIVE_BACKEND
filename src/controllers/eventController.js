@@ -106,209 +106,204 @@ export default class EventController {
     }
   }
 
-// =====================================================
-// 2. CREATE EVENT  (Updated for new frontend payload)
-// =====================================================
-static async createEvent(req, res) {
-  try {
-    const payload = req.body || {};
+  // =====================================================
+  // 2. CREATE EVENT  (Updated for new frontend payload)
+  // =====================================================
+  static async createEvent(req, res) {
+    try {
+      const payload = req.body || {};
 
-    const {
-      title,
-      description,
-      eventType,
-      accessMode,
+      const {
+        title,
+        description,
+        eventType,
+        accessMode,
 
-      startTime,
-      endTime,
+        startTime,
+        endTime,
 
-      s3Key,
-      s3Prefix,
+        s3Key,
+        s3Prefix,
 
-      videoConfig,
-      registrationFields,
+        videoConfig,
+        registrationFields,
 
-      paymentAmount,
-      currency,
-      accessPasswordHash,
-      accessPassword,
-    } = payload;
+        paymentAmount,
+        currency,
+        accessPasswordHash,
+        accessPassword,
+      } = payload;
 
-    // ---------------- BASIC VALIDATION ----------------
-    if (!title) return res.status(400).json({ message: "title is required" });
-    if (!description)
-      return res.status(400).json({ message: "description is required" });
-    if (!EVENT_TYPES.has(eventType))
-      return res.status(400).json({ message: "Invalid eventType" });
-    if (!ACCESS_MODES.has(accessMode))
-      return res.status(400).json({ message: "Invalid accessMode" });
+      // ---------------- BASIC VALIDATION ----------------
+      if (!title) return res.status(400).json({ message: "title is required" });
+      if (!description)
+        return res.status(400).json({ message: "description is required" });
+      if (!EVENT_TYPES.has(eventType))
+        return res.status(400).json({ message: "Invalid eventType" });
+      if (!ACCESS_MODES.has(accessMode))
+        return res.status(400).json({ message: "Invalid accessMode" });
 
-    // videoConfig validation (minimal, safe)
-    if (videoConfig) {
-      const { resolution, frameRate, bitrateProfile } = videoConfig;
+      // videoConfig validation (minimal, safe)
+      if (videoConfig) {
+        const { resolution, frameRate, bitrateProfile } = videoConfig;
 
-      if (
-        resolution &&
-        !["1080p", "720p", "480p"].includes(resolution)
-      ) {
-        return res
-          .status(400)
-          .json({ message: "Invalid videoConfig.resolution" });
-      }
+        if (
+          resolution &&
+          !["1080p", "720p", "480p"].includes(resolution)
+        ) {
+          return res
+            .status(400)
+            .json({ message: "Invalid videoConfig.resolution" });
+        }
 
-      if (
-        frameRate &&
-        ![25, 30, 60].includes(Number(frameRate))
-      ) {
-        return res
-          .status(400)
-          .json({ message: "Invalid videoConfig.frameRate" });
-      }
+        if (
+          frameRate &&
+          ![25, 30, 60].includes(Number(frameRate))
+        ) {
+          return res
+            .status(400)
+            .json({ message: "Invalid videoConfig.frameRate" });
+        }
 
-      if (
-        bitrateProfile &&
-        !["low", "medium", "high"].includes(bitrateProfile)
-      ) {
-        return res
-          .status(400)
-          .json({ message: "Invalid videoConfig.bitrateProfile" });
-      }
-    }
-
-    const createdBy =
-      req.user?.email ||
-      req.user?.id ||
-      req.user?.adminId ||
-      "unknown-admin";
-
-    // ---------------- TIME HANDLING ----------------
-    let finalStart = null;
-    let finalEnd = null;
-
-    if (eventType === "live" || eventType === "scheduled") {
-      if (!startTime)
-        return res.status(400).json({ message: "startTime is required" });
-
-      finalStart = toIsoString(startTime);
-      finalEnd = endTime ? toIsoString(endTime) : null;
-
-      if (eventType === "scheduled") {
-        if (new Date(finalStart) <= new Date()) {
-          return res.status(400).json({
-            message: "Scheduled event startTime must be in the future",
-          });
+        if (
+          bitrateProfile &&
+          !["low", "medium", "high"].includes(bitrateProfile)
+        ) {
+          return res
+            .status(400)
+            .json({ message: "Invalid videoConfig.bitrateProfile" });
         }
       }
+
+      const createdBy =
+        req.user?.email ||
+        req.user?.id ||
+        req.user?.adminId ||
+        "unknown-admin";
+
+      // ---------------- TIME HANDLING ----------------
+      let finalStart = null;
+      let finalEnd = null;
+
+      if (eventType === "live" || eventType === "scheduled") {
+        if (!startTime)
+          return res.status(400).json({ message: "startTime is required" });
+
+        finalStart = toIsoString(startTime);
+        finalEnd = endTime ? toIsoString(endTime) : null;
+
+        if (eventType === "scheduled") {
+          if (new Date(finalStart) <= new Date()) {
+            return res.status(400).json({
+              message: "Scheduled event startTime must be in the future",
+            });
+          }
+        }
+      }
+
+      // ---------------- VOD ----------------
+      let finalS3Key = null;
+      let finalPrefix = null;
+
+      if (eventType === "vod") {
+        if (!s3Key)
+          return res
+            .status(400)
+            .json({ message: "s3Key required for VOD" });
+
+        finalS3Key = s3Key;
+        finalPrefix =
+          s3Prefix || s3Key.substring(0, s3Key.lastIndexOf("/") + 1);
+      }
+
+      // ---------------- ACCESS MODE ----------------
+      let finalPasswordHash = null;
+      let finalRegFields = null;
+      let finalPayment = null;
+      let finalCurrency = null;
+
+      if (accessMode === "passwordAccess") {
+        if (!accessPassword) {
+          return res.status(400).json({ message: "Password required" });
+        }
+
+        finalRegFields = registrationFields || [];
+      }
+
+
+      if (accessMode === "emailAccess") {
+        finalRegFields = registrationFields || [];
+      }
+
+      if (accessMode === "paidAccess") {
+        finalPayment = Number(paymentAmount);
+        finalCurrency = resolveCurrency(currency);
+      }
+
+      // ---------------- STATUS ----------------
+      const status =
+        eventType === "live"
+          ? "live"
+          : eventType === "scheduled"
+            ? "scheduled"
+            : "uploaded";
+
+      // ---------------- SAVE ----------------
+      const now = nowISO();
+      const eventId = uuidv4();
+
+      const item = {
+        eventId,
+        title,
+        description,
+        eventType,
+        accessMode,
+        status,
+
+        startTime: finalStart,
+        endTime: finalEnd,
+
+        s3Key: finalS3Key,
+        s3Prefix: finalPrefix,
+        vodStatus: eventType === "vod" ? "UPLOADED" : null,
+
+        videoConfig: videoConfig || {
+          resolution: "1080p",
+          frameRate: 30,
+          bitrateProfile: "medium",
+        },
+
+        registrationFields: finalRegFields,
+
+        accessPassword: finalPasswordHash,
+        paymentAmount: finalPayment,
+        currency: finalCurrency,
+
+        createdBy,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: EVENTS_TABLE,
+          Item: item,
+        })
+      );
+
+      return res.status(201).json({
+        success: true,
+        eventId,
+        message: "Event created successfully",
+      });
+    } catch (err) {
+      console.error("Create Event Error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
-
-    // ---------------- VOD ----------------
-    let finalS3Key = null;
-    let finalPrefix = null;
-
-    if (eventType === "vod") {
-      if (!s3Key)
-        return res
-          .status(400)
-          .json({ message: "s3Key required for VOD" });
-
-      finalS3Key = s3Key;
-      finalPrefix =
-        s3Prefix || s3Key.substring(0, s3Key.lastIndexOf("/") + 1);
-    }
-
-    // ---------------- ACCESS MODE ----------------
-    let finalPasswordHash = null;
-    let finalRegFields = null;
-    let finalPayment = null;
-    let finalCurrency = null;
-
-    if (accessMode === "passwordAccess") {
-      if (accessPasswordHash)
-        finalPasswordHash = accessPasswordHash;
-      else if (accessPassword)
-        finalPasswordHash = await bcrypt.hash(
-          accessPassword,
-          SALT_ROUNDS
-        );
-      else
-        return res.status(400).json({ message: "Password required" });
-
-      finalRegFields = registrationFields || [];
-    }
-
-    if (accessMode === "emailAccess") {
-      finalRegFields = registrationFields || [];
-    }
-
-    if (accessMode === "paidAccess") {
-      finalPayment = Number(paymentAmount);
-      finalCurrency = resolveCurrency(currency);
-    }
-
-    // ---------------- STATUS ----------------
-    const status =
-      eventType === "live"
-        ? "live"
-        : eventType === "scheduled"
-        ? "scheduled"
-        : "uploaded";
-
-    // ---------------- SAVE ----------------
-    const now = nowISO();
-    const eventId = uuidv4();
-
-    const item = {
-      eventId,
-      title,
-      description,
-      eventType,
-      accessMode,
-      status,
-
-      startTime: finalStart,
-      endTime: finalEnd,
-
-      s3Key: finalS3Key,
-      s3Prefix: finalPrefix,
-      vodStatus: eventType === "vod" ? "UPLOADED" : null,
-
-      videoConfig: videoConfig || {
-        resolution: "1080p",
-        frameRate: 30,
-        bitrateProfile: "medium",
-      },
-
-      registrationFields: finalRegFields,
-
-      accessPassword: finalPasswordHash,
-      paymentAmount: finalPayment,
-      currency: finalCurrency,
-
-      createdBy,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: EVENTS_TABLE,
-        Item: item,
-      })
-    );
-
-    return res.status(201).json({
-      success: true,
-      eventId,
-      message: "Event created successfully",
-    });
-  } catch (err) {
-    console.error("Create Event Error:", err);
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
   }
-}
 
 
 
@@ -377,171 +372,171 @@ static async createEvent(req, res) {
     }
   }
 
-// =====================================================
-// 5. UPDATE EVENT (Updated for new frontend payload)
-// =====================================================
-static async updateEvent(req, res) {
-  try {
-    const { eventId } = req.params;
-    const payload = req.body || {};
+  // =====================================================
+  // 5. UPDATE EVENT (Updated for new frontend payload)
+  // =====================================================
+  static async updateEvent(req, res) {
+    try {
+      const { eventId } = req.params;
+      const payload = req.body || {};
 
-    const { Item: existing } = await ddbDocClient.send(
-      new GetCommand({
-        TableName: EVENTS_TABLE,
-        Key: { eventId },
-      })
-    );
+      const { Item: existing } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
+      );
 
-    if (!existing) {
-      return res.status(404).json({ message: "Event not found" });
-    }
-
-    // --------------------------------------------------
-    // ❌ eventType CANNOT be changed (for any event)
-    // --------------------------------------------------
-    if (payload.eventType && payload.eventType !== existing.eventType) {
-      return res.status(400).json({
-        message: "eventType cannot be changed",
-      });
-    }
-
-    const updated = {
-      ...existing,
-      updatedAt: nowISO(),
-    };
-
-    // ==================================================
-    // 1. TIME + VIDEO CONFIG (ONLY FOR SCHEDULED EVENTS)
-    // ==================================================
-    if (existing.eventType === "scheduled") {
-      // ---- startTime ----
-      if (payload.startTime) {
-        const newStart = toIsoString(payload.startTime);
-        if (new Date(newStart) <= new Date()) {
-          return res.status(400).json({
-            message: "Scheduled event startTime must be in the future",
-          });
-        }
-        updated.startTime = newStart;
+      if (!existing) {
+        return res.status(404).json({ message: "Event not found" });
       }
 
-      // ---- endTime ----
-      if (payload.endTime) {
-        updated.endTime = toIsoString(payload.endTime);
-      }
-
-      // ---- videoConfig ----
-      if (payload.videoConfig) {
-        const { resolution, frameRate, bitrateProfile } = payload.videoConfig;
-
-        if (
-          resolution &&
-          !["1080p", "720p", "480p"].includes(resolution)
-        ) {
-          return res
-            .status(400)
-            .json({ message: "Invalid videoConfig.resolution" });
-        }
-
-        if (
-          frameRate &&
-          ![25, 30, 60].includes(Number(frameRate))
-        ) {
-          return res
-            .status(400)
-            .json({ message: "Invalid videoConfig.frameRate" });
-        }
-
-        if (
-          bitrateProfile &&
-          !["low", "medium", "high"].includes(bitrateProfile)
-        ) {
-          return res
-            .status(400)
-            .json({ message: "Invalid videoConfig.bitrateProfile" });
-        }
-
-        updated.videoConfig = {
-          ...existing.videoConfig,
-          ...payload.videoConfig,
-        };
-      }
-    } else {
-      // ------------------------------------------------
-      // ❌ BLOCK time / videoConfig updates for LIVE/VOD
-      // ------------------------------------------------
-      if (payload.startTime || payload.endTime || payload.videoConfig) {
+      // --------------------------------------------------
+      // ❌ eventType CANNOT be changed (for any event)
+      // --------------------------------------------------
+      if (payload.eventType && payload.eventType !== existing.eventType) {
         return res.status(400).json({
-          message:
-            "startTime, endTime, and videoConfig can only be updated for scheduled events",
+          message: "eventType cannot be changed",
         });
       }
-    }
 
-    // ==================================================
-    // 2. ACCESS MODE (ALLOWED FOR ALL EVENTS)
-    // ==================================================
-    if (payload.accessMode) {
-      if (!ACCESS_MODES.has(payload.accessMode)) {
-        return res.status(400).json({ message: "Invalid accessMode" });
+      const updated = {
+        ...existing,
+        updatedAt: nowISO(),
+      };
+
+      // ==================================================
+      // 1. TIME + VIDEO CONFIG (ONLY FOR SCHEDULED EVENTS)
+      // ==================================================
+      if (existing.eventType === "scheduled") {
+        // ---- startTime ----
+        if (payload.startTime) {
+          const newStart = toIsoString(payload.startTime);
+          if (new Date(newStart) <= new Date()) {
+            return res.status(400).json({
+              message: "Scheduled event startTime must be in the future",
+            });
+          }
+          updated.startTime = newStart;
+        }
+
+        // ---- endTime ----
+        if (payload.endTime) {
+          updated.endTime = toIsoString(payload.endTime);
+        }
+
+        // ---- videoConfig ----
+        if (payload.videoConfig) {
+          const { resolution, frameRate, bitrateProfile } = payload.videoConfig;
+
+          if (
+            resolution &&
+            !["1080p", "720p", "480p"].includes(resolution)
+          ) {
+            return res
+              .status(400)
+              .json({ message: "Invalid videoConfig.resolution" });
+          }
+
+          if (
+            frameRate &&
+            ![25, 30, 60].includes(Number(frameRate))
+          ) {
+            return res
+              .status(400)
+              .json({ message: "Invalid videoConfig.frameRate" });
+          }
+
+          if (
+            bitrateProfile &&
+            !["low", "medium", "high"].includes(bitrateProfile)
+          ) {
+            return res
+              .status(400)
+              .json({ message: "Invalid videoConfig.bitrateProfile" });
+          }
+
+          updated.videoConfig = {
+            ...existing.videoConfig,
+            ...payload.videoConfig,
+          };
+        }
+      } else {
+        // ------------------------------------------------
+        // ❌ BLOCK time / videoConfig updates for LIVE/VOD
+        // ------------------------------------------------
+        if (payload.startTime || payload.endTime || payload.videoConfig) {
+          return res.status(400).json({
+            message:
+              "startTime, endTime, and videoConfig can only be updated for scheduled events",
+          });
+        }
       }
-      updated.accessMode = payload.accessMode;
-    }
 
-    if (payload.registrationFields) {
-      updated.registrationFields = payload.registrationFields;
-    }
+      // ==================================================
+      // 2. ACCESS MODE (ALLOWED FOR ALL EVENTS)
+      // ==================================================
+      if (payload.accessMode) {
+        if (!ACCESS_MODES.has(payload.accessMode)) {
+          return res.status(400).json({ message: "Invalid accessMode" });
+        }
+        updated.accessMode = payload.accessMode;
+      }
 
-    // ---- password access ----
-    if (payload.accessPassword) {
-      updated.accessPassword = await bcrypt.hash(
-        payload.accessPassword,
-        SALT_ROUNDS
+      if (payload.registrationFields) {
+        updated.registrationFields = payload.registrationFields;
+      }
+
+      // ---- password access ----
+      if (payload.accessPassword) {
+        updated.accessPassword = await bcrypt.hash(
+          payload.accessPassword,
+          SALT_ROUNDS
+        );
+      }
+
+      if (payload.accessPasswordHash) {
+        updated.accessPassword = payload.accessPasswordHash;
+      }
+
+      // ---- paid access ----
+      if (payload.paymentAmount !== undefined) {
+        updated.paymentAmount = Number(payload.paymentAmount);
+      }
+
+      if (payload.currency) {
+        updated.currency = resolveCurrency(payload.currency);
+      }
+
+      // ==================================================
+      // 3. SAFE META UPDATES
+      // ==================================================
+      if (payload.title) updated.title = payload.title;
+      if (payload.description) updated.description = payload.description;
+
+      // ==================================================
+      // 4. SAVE
+      // ==================================================
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: EVENTS_TABLE,
+          Item: updated,
+        })
       );
+
+      return res.status(200).json({
+        success: true,
+        message: "Event updated successfully",
+        eventId,
+      });
+    } catch (err) {
+      console.error("Update Event Error:", err);
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
     }
-
-    if (payload.accessPasswordHash) {
-      updated.accessPassword = payload.accessPasswordHash;
-    }
-
-    // ---- paid access ----
-    if (payload.paymentAmount !== undefined) {
-      updated.paymentAmount = Number(payload.paymentAmount);
-    }
-
-    if (payload.currency) {
-      updated.currency = resolveCurrency(payload.currency);
-    }
-
-    // ==================================================
-    // 3. SAFE META UPDATES
-    // ==================================================
-    if (payload.title) updated.title = payload.title;
-    if (payload.description) updated.description = payload.description;
-
-    // ==================================================
-    // 4. SAVE
-    // ==================================================
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: EVENTS_TABLE,
-        Item: updated,
-      })
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Event updated successfully",
-      eventId,
-    });
-  } catch (err) {
-    console.error("Update Event Error:", err);
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
   }
-}
 
 
 

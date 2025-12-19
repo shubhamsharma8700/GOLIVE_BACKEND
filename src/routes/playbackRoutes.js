@@ -73,7 +73,50 @@ router.post("/event/:eventId/register", PlaybackController.registerViewer);
 
 
 /* ============================================================
-   3. VERIFY PASSWORD (public)
+   3. VALIDATE VIEWER TOKEN (requires viewerAuth)
+   ============================================================ */
+/**
+ * @swagger
+ * /api/playback/event/{eventId}/validate:
+ *   get:
+ *     summary: Validate viewer token for an event
+ *     description:
+ *       Checks whether the viewerToken stored on the client
+ *       is valid for this event and still authorized.
+ *     tags: [Playback]
+ *     parameters:
+ *       - in: path
+ *         name: eventId
+ *         required: true
+ *         schema: { type: string }
+ *     security:
+ *       - bearerAuth: []  # viewerToken is provided here
+ *     responses:
+ *       200:
+ *         description: Viewer token is valid
+ *       401:
+ *         description: Invalid or expired viewer token
+ */
+router.get(
+  "/event/:eventId/validate",
+  viewerAuth,
+  (req, res) => {
+    return res.status(200).json({
+      success: true,
+      viewer: {
+        eventId: req.viewer.eventId,
+        clientViewerId: req.viewer.clientViewerId,
+        accessVerified: req.viewer.accessVerified,
+        isPaidViewer: req.viewer.isPaidViewer,
+      },
+    });
+  }
+);
+
+
+
+/* ============================================================
+   4. VERIFY PASSWORD (public)
    ============================================================ */
 /**
  * @swagger
@@ -106,7 +149,7 @@ router.post("/event/:eventId/verify-password", PlaybackController.verifyPassword
 
 
 /* ============================================================
-   4. GET STREAM URL (requires viewerAuth)
+   5. GET STREAM URL (requires viewerAuth)
    ============================================================ */
 /**
  * @swagger
