@@ -110,8 +110,9 @@ export default class PaymentsController {
             clientViewerId: viewer.clientViewerId,
             createdAt,
           },
-          success_url: `${FRONTEND_URL}/event/${eventId}/payment-success`,
-          cancel_url: `${FRONTEND_URL}/event/${eventId}/payment-cancel`,
+          success_url: `${FRONTEND_URL}/player/${eventId}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${FRONTEND_URL}/player/${eventId}?payment=cancel`,
+
         },
         {
           idempotencyKey: paymentId,
@@ -163,12 +164,12 @@ export default class PaymentsController {
       const signature = req.headers["stripe-signature"];
 
       stripeEvent = stripe.webhooks.constructEvent(
-        req.body,
+        req.body, // RAW BUFFER (because express.raw)
         signature,
         process.env.STRIPE_WEBHOOK_SECRET
       );
     } catch (err) {
-      console.error("Webhook signature verification failed:", err);
+      console.error("Stripe signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
@@ -184,28 +185,27 @@ export default class PaymentsController {
         } = session.metadata || {};
 
         if (!paymentId || !createdAt) {
-          console.warn("Webhook missing metadata");
+          console.warn("Missing payment metadata");
           return res.status(200).json({ received: true });
         }
 
-        /* ---------- Idempotency Check ---------- */
-        const existing = await ddbDocClient.send(
-          new QueryCommand({
+        // ✅ Correct lookup (PK + SK)
+        const paymentRecord = await ddbDocClient.send(
+          new GetCommand({
             TableName: PAYMENTS_TABLE,
-            KeyConditionExpression: "paymentId = :pid",
-            ExpressionAttributeValues: {
-              ":pid": paymentId,
+            Key: {
+              paymentId,
+              createdAt,
             },
-            Limit: 1,
           })
         );
 
-        const payment = existing.Items?.[0];
+        const payment = paymentRecord.Item;
+
         if (!payment || payment.status === "succeeded") {
           return res.status(200).json({ received: true });
         }
 
-        /* ---------- Fetch Receipt ---------- */
         let receiptUrl = null;
         if (session.payment_intent) {
           const intent = await stripe.paymentIntents.retrieve(
@@ -215,13 +215,13 @@ export default class PaymentsController {
             intent?.charges?.data?.[0]?.receipt_url || null;
         }
 
-        /* ---------- Update Payment ---------- */
+        // ✅ Update payment
         await ddbDocClient.send(
           new UpdateCommand({
             TableName: PAYMENTS_TABLE,
             Key: {
               paymentId,
-              createdAt: payment.createdAt,
+              createdAt,
             },
             UpdateExpression:
               "SET #s = :s, stripePaymentIntentId = :pi, receiptUrl = :r, updatedAt = :u",
@@ -237,7 +237,7 @@ export default class PaymentsController {
           })
         );
 
-        /* ---------- Grant Viewer Access ---------- */
+        // ✅ Grant viewer access
         await ddbDocClient.send(
           new UpdateCommand({
             TableName: VIEWERS_TABLE,
@@ -264,6 +264,7 @@ export default class PaymentsController {
       return res.status(500).json({ error: err.message });
     }
   }
+
 
   /* ======================================================
      3️⃣ CHECK PAYMENT STATUS (VIEWER)

@@ -55,12 +55,11 @@ app.use(
 app.post(
   "/api/payments/stripe/webhook",
   express.raw({ type: "application/json" }),
-  (req, res) => {
-    // Stripe needs raw body, NOT JSON
-    req.rawBody = req.body;
-    return PaymentsController.webhook(req, res);
-  }
+  PaymentsController.webhook
 );
+
+// AFTER webhook route
+app.use(express.json());
 
 /* ======================================================
    JSON body parser (AFTER webhook)
