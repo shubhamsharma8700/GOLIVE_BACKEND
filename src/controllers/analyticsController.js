@@ -6,6 +6,8 @@ import {
 } from "../config/awsClients.js";
 import { v4 as uuidv4 } from "uuid";
 
+import {extractViewerContext} from "../utils/cloudfrontHeaders.js";
+
 const ANALYTICS_TABLE =
   process.env.ANALYTICS_TABLE || "go-live-analytics";
 
@@ -16,66 +18,81 @@ export default class AnalyticsController {
   /* ============================================================
      1. START SESSION (Viewer)
      ============================================================ */
-  static async startSession(req, res) {
-    try {
-      const { eventId } = req.params;
-      const viewer = req.viewer;
+static async startSession(req, res) {
+  try {
+    const { eventId } = req.params;
+    const viewer = req.viewer;
 
-      if (!viewer || viewer.eventId !== eventId) {
-        return res.status(401).json({
-          success: false,
-          message: "Viewer unauthorized for this event",
-        });
-      }
-
-      const sessionId = uuidv4();
-
-      const item = {
-        sessionId,                     // PK
-        eventId,                       // GSI
-        viewerToken: viewer.viewerToken,
-        clientViewerId: viewer.clientViewerId,
-
-        playbackType: req.body.playbackType || "vod",
-
-        // Session-specific metadata
-        deviceInfo: req.body.deviceInfo || {},
-        location: req.body.location || {},
-
-        // Trusted server-side IP
-        ipAddress:
-          req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-          req.socket.remoteAddress ||
-          null,
-
-
-        startTime: nowISO(),
-        endTime: null,
-        duration: 0,
-
-        createdAt: nowISO(),
-      };
-
-      await ddbDocClient.send(
-        new PutCommand({
-          TableName: ANALYTICS_TABLE,
-          Item: item,
-        })
-      );
-
-      return res.status(201).json({
-        success: true,
-        sessionId,
-      });
-
-    } catch (err) {
-      console.error("startSession error:", err);
-      return res.status(500).json({
+    // ---------------- AUTH VALIDATION ----------------
+    if (!viewer || viewer.eventId !== eventId) {
+      return res.status(401).json({
         success: false,
-        message: "Failed to start analytics session",
+        message: "Viewer unauthorized for this event",
       });
     }
+
+    const sessionId = uuidv4();
+    const now = nowISO();
+
+    // ---------------- COLLECT TRUSTED CONTEXT ----------------
+    // ✅ Collected ONLY at session start
+    const viewerContext = extractViewerContext(req);
+
+    // ---------------- BUILD SESSION ITEM ----------------
+    const item = {
+      // PK
+      sessionId,
+
+      // GSIs
+      eventId,
+      clientViewerId: viewer.clientViewerId,
+
+      viewerToken: viewer.viewerToken,
+      playbackType: req.body?.playbackType || "vod",
+
+      // -------- DEVICE (frontend – best effort) --------
+      device: {
+        deviceType: req.body?.deviceInfo?.deviceType || null,
+        userAgent: req.body?.deviceInfo?.userAgent || null,
+        browser: req.body?.deviceInfo?.browser || null,
+        os: req.body?.deviceInfo?.os || null,
+        screen: req.body?.deviceInfo?.screen || null,
+        timezone: req.body?.deviceInfo?.timezone || null,
+      },
+
+      // -------- NETWORK (CloudFront – trusted) --------
+      network: viewerContext,
+
+      // -------- SESSION METRICS --------
+      startTime: now,
+      endTime: null,
+      duration: 0,
+
+      createdAt: now,
+    };
+
+    // ---------------- SAVE SESSION ----------------
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: ANALYTICS_TABLE,
+        Item: item,
+      })
+    );
+
+    return res.status(201).json({
+      success: true,
+      sessionId,
+    });
+
+  } catch (err) {
+    console.error("startSession error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to start analytics session",
+    });
   }
+}
+
 
   /* ============================================================
      2. END SESSION (Viewer)

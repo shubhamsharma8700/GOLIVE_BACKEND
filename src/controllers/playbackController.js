@@ -7,8 +7,7 @@ import {
   UpdateCommand,
 } from "../config/awsClients.js";
 
-import { v4 as uuidv4 } from "uuid";
-import bcrypt from "bcryptjs";
+import {extractViewerContext} from "../utils/cloudfrontHeaders.js";
 
 import { signViewerToken } from "../utils/viewerJwt.js";
 import { sendPasswordFromServer } from "../utils/sendPasswordFromServer.js";
@@ -170,7 +169,6 @@ static async registerViewer(req, res) {
       name,
       email,
       deviceInfo,
-      ipAddress,
     } = req.body || {};
 
     // ---------------- BASIC VALIDATION ----------------
@@ -199,15 +197,19 @@ static async registerViewer(req, res) {
     const now = nowISO();
 
     // ---------------- ACCESS RULES ----------------
-    // Free + Email access = immediate playback
     const accessVerified =
       event.accessMode === "freeAccess" ||
       event.accessMode === "emailAccess";
+
+    // ---------------- COLLECT TRUSTED CONTEXT ----------------
+    // ✅ Only happens here (register API)
+    const viewerContext = extractViewerContext(req);
 
     // ---------------- BUILD VIEWER ITEM ----------------
     const viewerItem = {
       eventId,
       clientViewerId,
+
       email: email || formData?.email || null,
       name: name || formData?.name || null,
       formData: formData || null,
@@ -216,8 +218,18 @@ static async registerViewer(req, res) {
       isPaidViewer: false,
       paymentStatus: "none",
 
-      deviceType: deviceInfo?.deviceType || null,
-      ipAddress: ipAddress || req.ip || null,
+      // -------- DEVICE (Frontend – best effort) --------
+      device: {
+        deviceType: deviceInfo?.deviceType || null,
+        userAgent: deviceInfo?.userAgent || null,
+        browser: deviceInfo?.browser || null,
+        os: deviceInfo?.os || null,
+        screen: deviceInfo?.screen || null,
+        timezone: deviceInfo?.timezone || null,
+      },
+
+      // -------- NETWORK (CloudFront – trusted) --------
+      network: viewerContext,
 
       firstJoinAt: now,
       lastJoinAt: now,
@@ -228,7 +240,7 @@ static async registerViewer(req, res) {
       updatedAt: now,
     };
 
-    // ---------------- SAVE / OVERWRITE VIEWER ----------------
+    // ---------------- SAVE VIEWER ----------------
     await ddbDocClient.send(
       new PutCommand({
         TableName: VIEWERS_TABLE,
@@ -236,7 +248,7 @@ static async registerViewer(req, res) {
       })
     );
 
-    // ---------------- PASSWORD ACCESS → EMAIL SAME EVENT PASSWORD ----------------
+    // ---------------- PASSWORD ACCESS ----------------
     if (event.accessMode === "passwordAccess") {
       const targetEmail = email || formData?.email;
 
@@ -258,7 +270,7 @@ static async registerViewer(req, res) {
         eventId,
         email: targetEmail,
         firstName: name || "",
-        password: event.accessPassword, // SAME PASSWORD FOR ALL
+        password: event.accessPassword,
         eventTitle: event.title,
       });
     }
@@ -285,7 +297,6 @@ static async registerViewer(req, res) {
     });
   }
 }
-
 
   /* =====================================================
      VERIFY PASSWORD
