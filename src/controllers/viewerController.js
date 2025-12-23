@@ -3,36 +3,60 @@ import {
   ScanCommand,
   QueryCommand,
   DeleteCommand,
+  GetCommand,
 } from "../config/awsClients.js";
 
 const VIEWERS_TABLE = process.env.VIEWERS_TABLE_NAME;
+const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME;
 const VIEWER_ID_INDEX = "viewerId-index";
 
 if (!VIEWERS_TABLE) {
   throw new Error("Missing ENV variable: VIEWERS_TABLE_NAME");
 }
 
+if (!EVENTS_TABLE) {
+  throw new Error("Missing ENV variable: EVENTS_TABLE_NAME");
+}
+
 /* -------------------------------------------------------
-   Helper
+   Helpers
 ------------------------------------------------------- */
 function formatViewer(v) {
   if (!v) return null;
 
   return {
     ...v,
-    createdAt: v.createdAt
-      ? new Date(v.createdAt).toISOString()
-      : null,
+    createdAt: v.createdAt ? new Date(v.createdAt).toISOString() : null,
+    updatedAt: v.updatedAt ? new Date(v.updatedAt).toISOString() : null,
     lastActiveAt: v.lastActiveAt
       ? new Date(v.lastActiveAt).toISOString()
       : null,
+    firstJoinAt: v.firstJoinAt
+      ? new Date(v.firstJoinAt).toISOString()
+      : null,
+    lastJoinAt: v.lastJoinAt
+      ? new Date(v.lastJoinAt).toISOString()
+      : null,
+  };
+}
+
+function formatEvent(e) {
+  if (!e) return null;
+
+  return {
+    eventId: e.eventId,
+    title: e.title,
+    eventType: e.eventType,
+    accessMode: e.accessMode,
+    status: e.status,
+    startTime: e.startTime || null,
+    endTime: e.endTime || null,
   };
 }
 
 /* =======================================================
    1. LIST ALL VIEWERS (ADMIN)
    GET /api/viewers
-   Uses Scan (no global PK exists)
 ======================================================= */
 export async function listViewers(req, res, next) {
   try {
@@ -56,20 +80,40 @@ export async function listViewers(req, res, next) {
     }
 
     const result = await ddbDocClient.send(new ScanCommand(params));
+    const viewers = result.Items || [];
 
-    const nextKey = result.LastEvaluatedKey;
+    /* ---------- FETCH EVENTS PER VIEWER ---------- */
+    const eventIds = [...new Set(viewers.map(v => v.eventId))];
+
+    const eventMap = {};
+    await Promise.all(
+      eventIds.map(async (eventId) => {
+        const res = await ddbDocClient.send(
+          new GetCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId },
+          })
+        );
+        if (res.Item) {
+          eventMap[eventId] = formatEvent(res.Item);
+        }
+      })
+    );
 
     res.json({
-      items: (result.Items || []).map(formatViewer),
+      items: viewers.map(v => ({
+        ...formatViewer(v),
+        event: eventMap[v.eventId] || null,
+      })),
       pagination: {
         limit,
-        nextKey: nextKey
+        nextKey: result.LastEvaluatedKey
           ? {
-              lastEventId: nextKey.eventId,
-              lastClientViewerId: nextKey.clientViewerId,
+              lastEventId: result.LastEvaluatedKey.eventId,
+              lastClientViewerId: result.LastEvaluatedKey.clientViewerId,
             }
           : null,
-        hasMore: Boolean(nextKey),
+        hasMore: Boolean(result.LastEvaluatedKey),
       },
     });
   } catch (err) {
@@ -86,30 +130,47 @@ export async function listViewersByEvent(req, res, next) {
     const { eventId } = req.params;
     const limit = parseInt(req.query.limit || "10", 10);
 
-    const lastKey = req.query.lastClientViewerId
-      ? { eventId, clientViewerId: req.query.lastClientViewerId }
-      : null;
-
     if (!eventId) {
       return res.status(400).json({ error: "eventId is required" });
     }
+
+    /* ---------- FETCH EVENT ONCE ---------- */
+    const eventRes = await ddbDocClient.send(
+      new GetCommand({
+        TableName: EVENTS_TABLE,
+        Key: { eventId },
+      })
+    );
+
+    if (!eventRes.Item) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const eventInfo = formatEvent(eventRes.Item);
 
     const params = {
       TableName: VIEWERS_TABLE,
       KeyConditionExpression: "eventId = :e",
       ExpressionAttributeValues: { ":e": eventId },
       Limit: limit,
-      ScanIndexForward: false, // latest viewers first
+      ScanIndexForward: false,
     };
 
-    if (lastKey) {
-      params.ExclusiveStartKey = lastKey;
+    if (req.query.lastClientViewerId) {
+      params.ExclusiveStartKey = {
+        eventId,
+        clientViewerId: req.query.lastClientViewerId,
+      };
     }
 
     const result = await ddbDocClient.send(new QueryCommand(params));
 
     res.json({
-      items: (result.Items || []).map(formatViewer),
+      event: eventInfo,
+      items: (result.Items || []).map(v => ({
+        ...formatViewer(v),
+        event: eventInfo,
+      })),
       pagination: {
         limit,
         nextKey: result.LastEvaluatedKey
@@ -126,7 +187,6 @@ export async function listViewersByEvent(req, res, next) {
 /* =======================================================
    3. GET VIEWER BY ID (ADMIN)
    GET /api/viewers/:clientViewerId
-   Uses GSI (viewerId-index)
 ======================================================= */
 export async function getViewerById(req, res, next) {
   try {
@@ -138,7 +198,7 @@ export async function getViewerById(req, res, next) {
         IndexName: VIEWER_ID_INDEX,
         KeyConditionExpression: "clientViewerId = :v",
         ExpressionAttributeValues: { ":v": clientViewerId },
-        ScanIndexForward: false, // latest activity first
+        ScanIndexForward: false,
       })
     );
 
@@ -146,8 +206,26 @@ export async function getViewerById(req, res, next) {
       return res.status(404).json({ error: "Viewer not found" });
     }
 
-    // Viewer may exist across multiple events
-    res.json(result.Items.map(formatViewer));
+    const viewers = result.Items;
+
+    /* ---------- FETCH EVENT PER VIEWER ---------- */
+    const enriched = await Promise.all(
+      viewers.map(async (v) => {
+        const eventRes = await ddbDocClient.send(
+          new GetCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId: v.eventId },
+          })
+        );
+
+        return {
+          ...formatViewer(v),
+          event: eventRes.Item ? formatEvent(eventRes.Item) : null,
+        };
+      })
+    );
+
+    res.json(enriched);
   } catch (err) {
     next(err);
   }

@@ -5,11 +5,13 @@ import {
   QueryCommand,
 } from "../config/awsClients.js";
 import { v4 as uuidv4 } from "uuid";
-
-import {extractViewerContext} from "../utils/cloudfrontHeaders.js";
+import { extractViewerContext } from "../utils/cloudfrontHeaders.js";
 
 const ANALYTICS_TABLE =
   process.env.ANALYTICS_TABLE || "go-live-analytics";
+
+const VIEWERS_TABLE =
+  process.env.VIEWERS_TABLE_NAME || "go-live-viewers";
 
 const nowISO = () => new Date().toISOString();
 
@@ -18,81 +20,97 @@ export default class AnalyticsController {
   /* ============================================================
      1. START SESSION (Viewer)
      ============================================================ */
-static async startSession(req, res) {
-  try {
-    const { eventId } = req.params;
-    const viewer = req.viewer;
+  static async startSession(req, res) {
+    try {
+      const { eventId } = req.params;
+      const viewer = req.viewer;
 
-    // ---------------- AUTH VALIDATION ----------------
-    if (!viewer || viewer.eventId !== eventId) {
-      return res.status(401).json({
+      if (!viewer || viewer.eventId !== eventId) {
+        return res.status(401).json({
+          success: false,
+          message: "Viewer unauthorized for this event",
+        });
+      }
+
+      const sessionId = uuidv4();
+      const now = nowISO();
+
+      // Trusted network context (CloudFront)
+      const viewerContext = extractViewerContext(req);
+
+      /* ---------------- SESSION ITEM ---------------- */
+      const sessionItem = {
+        sessionId,
+
+        // GSIs
+        eventId,
+        clientViewerId: viewer.clientViewerId,
+
+        viewerToken: viewer.viewerToken,
+        playbackType: req.body?.playbackType || "vod",
+
+        device: {
+          deviceType: req.body?.deviceInfo?.deviceType || null,
+          userAgent: req.body?.deviceInfo?.userAgent || null,
+          browser: req.body?.deviceInfo?.browser || null,
+          os: req.body?.deviceInfo?.os || null,
+          screen: req.body?.deviceInfo?.screen || null,
+          timezone: req.body?.deviceInfo?.timezone || null,
+        },
+
+        network: viewerContext,
+
+        startTime: now,
+        endTime: null,
+        duration: 0,
+
+        createdAt: now,
+      };
+
+      /* ---------------- SAVE SESSION ---------------- */
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: ANALYTICS_TABLE,
+          Item: sessionItem,
+        })
+      );
+
+      /* ---------------- UPDATE VIEWER ---------------- */
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: VIEWERS_TABLE,
+          Key: {
+            eventId,
+            clientViewerId: viewer.clientViewerId,
+          },
+          UpdateExpression: `
+            SET
+              lastJoinAt = :now,
+              lastActiveAt = :now,
+              updatedAt = :now
+            ADD
+              totalSessions :one
+          `,
+          ExpressionAttributeValues: {
+            ":now": now,
+            ":one": 1,
+          },
+        })
+      );
+
+      return res.status(201).json({
+        success: true,
+        sessionId,
+      });
+
+    } catch (err) {
+      console.error("startSession error:", err);
+      return res.status(500).json({
         success: false,
-        message: "Viewer unauthorized for this event",
+        message: "Failed to start analytics session",
       });
     }
-
-    const sessionId = uuidv4();
-    const now = nowISO();
-
-    // ---------------- COLLECT TRUSTED CONTEXT ----------------
-    // ✅ Collected ONLY at session start
-    const viewerContext = extractViewerContext(req);
-
-    // ---------------- BUILD SESSION ITEM ----------------
-    const item = {
-      // PK
-      sessionId,
-
-      // GSIs
-      eventId,
-      clientViewerId: viewer.clientViewerId,
-
-      viewerToken: viewer.viewerToken,
-      playbackType: req.body?.playbackType || "vod",
-
-      // -------- DEVICE (frontend – best effort) --------
-      device: {
-        deviceType: req.body?.deviceInfo?.deviceType || null,
-        userAgent: req.body?.deviceInfo?.userAgent || null,
-        browser: req.body?.deviceInfo?.browser || null,
-        os: req.body?.deviceInfo?.os || null,
-        screen: req.body?.deviceInfo?.screen || null,
-        timezone: req.body?.deviceInfo?.timezone || null,
-      },
-
-      // -------- NETWORK (CloudFront – trusted) --------
-      network: viewerContext,
-
-      // -------- SESSION METRICS --------
-      startTime: now,
-      endTime: null,
-      duration: 0,
-
-      createdAt: now,
-    };
-
-    // ---------------- SAVE SESSION ----------------
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: ANALYTICS_TABLE,
-        Item: item,
-      })
-    );
-
-    return res.status(201).json({
-      success: true,
-      sessionId,
-    });
-
-  } catch (err) {
-    console.error("startSession error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to start analytics session",
-    });
   }
-}
-
 
   /* ============================================================
      2. END SESSION (Viewer)
@@ -108,6 +126,10 @@ static async startSession(req, res) {
         });
       }
 
+      const now = nowISO();
+      const dur = Number(duration) || 0;
+
+      /* ---------------- UPDATE SESSION ---------------- */
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: ANALYTICS_TABLE,
@@ -117,8 +139,8 @@ static async startSession(req, res) {
             "#d": "duration",
           },
           ExpressionAttributeValues: {
-            ":end": nowISO(),
-            ":dur": Number(duration) || 0,
+            ":end": now,
+            ":dur": dur,
           },
         })
       );
@@ -133,23 +155,24 @@ static async startSession(req, res) {
     }
   }
 
-
   /* ============================================================
      3. HEARTBEAT (Viewer)
      ============================================================ */
   static async heartbeat(req, res) {
     try {
-      const { sessionId, seconds } = req.body;
+      const { sessionId, seconds, eventId, clientViewerId } = req.body;
 
-      if (!sessionId) {
+      if (!sessionId || !eventId || !clientViewerId) {
         return res.status(400).json({
           success: false,
-          message: "sessionId required",
+          message: "sessionId, eventId, clientViewerId required",
         });
       }
 
       const increment = Math.max(0, Number(seconds) || 0);
+      const now = nowISO();
 
+      /* ---------------- UPDATE SESSION ---------------- */
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: ANALYTICS_TABLE,
@@ -164,6 +187,25 @@ static async startSession(req, res) {
         })
       );
 
+      /* ---------------- UPDATE VIEWER ---------------- */
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: VIEWERS_TABLE,
+          Key: {
+            eventId,
+            clientViewerId,
+          },
+          UpdateExpression: `
+            ADD totalWatchTime :sec
+            SET lastActiveAt = :now, updatedAt = :now
+          `,
+          ExpressionAttributeValues: {
+            ":sec": increment,
+            ":now": now,
+          },
+        })
+      );
+
       return res.status(200).json({ success: true });
     } catch (err) {
       console.error("heartbeat error:", err);
@@ -173,7 +215,6 @@ static async startSession(req, res) {
       });
     }
   }
-
 
   /* ============================================================
      4. ADMIN — EVENT SUMMARY
