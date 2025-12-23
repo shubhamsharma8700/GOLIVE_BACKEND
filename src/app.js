@@ -3,13 +3,13 @@ import cors from "cors";
 import bodyParser from "body-parser";
 
 import eventRoutes from "./routes/eventRoutes.js";
-import accessRoutes from "./routes/accessRoutes.js";
 import playbackRoutes from "./routes/playbackRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import PaymentsController from "./controllers/paymentsController.js";
+import viewerRoutes from "./routes/viewerRoutes.js";
 
 const app = express();
 app.set("trust proxy", true);
@@ -71,8 +71,8 @@ app.use(bodyParser.json());
 ====================================================== */
 app.use("/api/admin", adminRoutes);
 app.use("/api/events", eventRoutes);
-app.use("/api/access", accessRoutes);
 app.use("/api/playback", playbackRoutes);
+app.use("/api/viewers", viewerRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/payments", paymentRoutes); // ← create-session, verify, admin
 app.use("/api/aws", awsRoutes);
