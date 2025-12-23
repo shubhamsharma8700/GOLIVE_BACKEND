@@ -180,7 +180,7 @@ export async function login(req, res, next) {
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: JWT_REFRESH_EXPIRES_IN * 1000,
     });
 
@@ -210,6 +210,9 @@ export async function login(req, res, next) {
     next(err);
   }
 }
+
+
+
 
 /* =====================================================
    3. REFRESH ACCESS TOKEN

@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
+import cookieParser from "cookie-parser";
 
 import eventRoutes from "./routes/eventRoutes.js";
 import playbackRoutes from "./routes/playbackRoutes.js";
@@ -65,6 +66,8 @@ app.use(express.json());
    JSON body parser (AFTER webhook)
 ====================================================== */
 app.use(bodyParser.json());
+
+app.use(cookieParser());
 
 /* ======================================================
    API Routes

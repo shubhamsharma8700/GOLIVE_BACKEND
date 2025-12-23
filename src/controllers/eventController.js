@@ -6,18 +6,45 @@ import {
   DeleteCommand,
 } from "../config/awsClients.js";
 
-import { S3Client, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import {
+  CloudFrontClient,
+  GetDistributionConfigCommand,
+  UpdateDistributionCommand,
+  DeleteDistributionCommand,
+} from "@aws-sdk/client-cloudfront";
 
+import {
+  MediaLiveClient,
+  StopChannelCommand,
+  DeleteChannelCommand,
+  DeleteInputCommand,
+} from "@aws-sdk/client-medialive";
+
+import {
+  MediaPackageClient,
+  DeleteChannelCommand as DeleteMediaPackageChannelCommand,
+} from "@aws-sdk/client-mediapackage";
+
+import {
+  S3Client,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
+  PutObjectCommand,
+} from "@aws-sdk/client-s3";
+
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcryptjs";
+
+/* ======================================================
+   CONSTANTS
+====================================================== */
 
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 const VOD_BUCKET = process.env.S3_VOD_BUCKET || "go-live-vod";
 const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 900);
 
 const EVENT_TYPES = new Set(["live", "scheduled", "vod"]);
-
 const ACCESS_MODES = new Set([
   "freeAccess",
   "emailAccess",
@@ -27,11 +54,20 @@ const ACCESS_MODES = new Set([
 
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION || "ap-south-1",
-});
+/* ======================================================
+   AWS CLIENTS
+====================================================== */
 
-// ------------------ Helpers ------------------
+const region = process.env.AWS_REGION || "ap-south-1";
+
+const s3Client = new S3Client({ region });
+const cloudFrontClient = new CloudFrontClient({ region });
+const mediaLiveClient = new MediaLiveClient({ region });
+const mediaPackageClient = new MediaPackageClient({ region });
+
+/* ======================================================
+   HELPERS
+====================================================== */
 
 const nowISO = () => new Date().toISOString();
 
@@ -66,6 +102,63 @@ const resolveCurrency = (value) => {
   if (!/^[A-Z]{3}$/.test(cur)) throw new Error("currency must be ISO 4217");
   return cur;
 };
+
+/** Delete all objects under an S3 prefix */
+async function deleteS3Prefix(bucket, prefix) {
+  let token;
+
+  do {
+    const res = await s3Client.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: token,
+      })
+    );
+
+    if (!res.Contents || res.Contents.length === 0) return;
+
+    await s3Client.send(
+      new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: {
+          Objects: res.Contents.map((o) => ({ Key: o.Key })),
+        },
+      })
+    );
+
+    token = res.NextContinuationToken;
+  } while (token);
+}
+
+/** Disable & delete CloudFront distribution */
+async function deleteCloudFrontDistribution(distributionId) {
+  const { DistributionConfig, ETag } =
+    await cloudFrontClient.send(
+      new GetDistributionConfigCommand({ Id: distributionId })
+    );
+
+  if (DistributionConfig.Enabled) {
+    DistributionConfig.Enabled = false;
+
+    await cloudFrontClient.send(
+      new UpdateDistributionCommand({
+        Id: distributionId,
+        IfMatch: ETag,
+        DistributionConfig,
+      })
+    );
+
+    await new Promise((res) => setTimeout(res, 60_000));
+  }
+
+  await cloudFrontClient.send(
+    new DeleteDistributionCommand({
+      Id: distributionId,
+      IfMatch: ETag,
+    })
+  );
+}
 
 // =======================================================
 //        EVENT CONTROLLER
@@ -543,25 +636,106 @@ export default class EventController {
   // =====================================================
   // 6. DELETE EVENT
   // =====================================================
+  // static async deleteEvent(req, res) {
+  //   try {
+  //     const { eventId } = req.params;
+
+  //     const response = await ddbDocClient.send(
+  //       new DeleteCommand({
+  //         TableName: EVENTS_TABLE,
+  //         Key: { eventId },
+  //         ReturnValues: "ALL_OLD",
+  //       })
+  //     );
+
+  //     if (!response.Attributes)
+  //       return res.status(404).json({ success: false, message: "Event not found" });
+
+  //     return res.status(200).json({ success: true, message: "Event deleted" });
+  //   } catch (err) {
+  //     console.error("Delete event error:", err);
+  //     return res.status(500).json({ success: false, message: err.message });
+  //   }
+  // }
+
   static async deleteEvent(req, res) {
     try {
       const { eventId } = req.params;
 
-      const response = await ddbDocClient.send(
-        new DeleteCommand({
+      const { Item: event } = await ddbDocClient.send(
+        new GetCommand({
           TableName: EVENTS_TABLE,
           Key: { eventId },
-          ReturnValues: "ALL_OLD",
         })
       );
 
-      if (!response.Attributes)
+      if (!event)
         return res.status(404).json({ success: false, message: "Event not found" });
 
-      return res.status(200).json({ success: true, message: "Event deleted" });
+      /* ---------- LIVE CLEANUP ---------- */
+      if (event.eventType === "live") {
+        if (event.mediaLiveChannelId) {
+          await mediaLiveClient.send(
+            new StopChannelCommand({ ChannelId: event.mediaLiveChannelId })
+          );
+          await mediaLiveClient.send(
+            new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
+          );
+        }
+
+        if (event.mediaLiveInputId) {
+          await mediaLiveClient.send(
+            new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+          );
+        }
+
+        if (event.mediaPackageChannelId) {
+          await mediaPackageClient.send(
+            new DeleteMediaPackageChannelCommand({
+              Id: event.mediaPackageChannelId,
+            })
+          );
+        }
+
+        if (event.distributionId) {
+          await deleteCloudFrontDistribution(event.distributionId);
+        }
+
+        if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+          await deleteS3Prefix(
+            event.s3RecordingBucket,
+            event.s3RecordingPrefix
+          );
+        }
+      }
+
+      /* ---------- VOD CLEANUP ---------- */
+      if (event.eventType === "vod") {
+        if (event.s3Prefix) {
+          await deleteS3Prefix(VOD_BUCKET, event.s3Prefix);
+        }
+        if (event.vodOutputPath) {
+          await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
+        }
+      }
+
+      await ddbDocClient.send(
+        new DeleteCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Event and all related resources deleted successfully",
+      });
     } catch (err) {
       console.error("Delete event error:", err);
-      return res.status(500).json({ success: false, message: err.message });
+      return res.status(500).json({
+        success: false,
+        message: err.message || "Failed to delete event",
+      });
     }
   }
 }
