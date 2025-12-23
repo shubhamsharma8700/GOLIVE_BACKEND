@@ -26,7 +26,6 @@ function resolveStreamUrl(event) {
   const now = new Date();
 
   const startTime = event.startTime ? new Date(event.startTime) : null;
-  const endTime = event.endTime ? new Date(event.endTime) : null;
 
   const liveUrl =
     event.cloudFrontUrl ||
@@ -34,15 +33,35 @@ function resolveStreamUrl(event) {
     null;
 
   const vodUrl =
-    event.vodcloudFrontUrl ||
     event.vodCloudFrontUrl ||
     event.vod1080pUrl ||
     event.vod720pUrl ||
     event.vod480pUrl ||
     null;
 
-  /* ---------------- SCHEDULED / LIVE ---------------- */
-  if (event.eventType === "live" || event.eventType === "scheduled") {
+  const isVodReady = event.vodStatus === "READY";
+
+  /* ---------------- LIVE ---------------- */
+  if (event.eventType === "live") {
+    // ✅ Once VOD is ready → ALWAYS switch to VOD
+    if (isVodReady && vodUrl) {
+      return { streamUrl: vodUrl, playbackType: "vod" };
+    }
+
+    // ✅ Otherwise allow LIVE if URL exists
+    if (liveUrl) {
+      return { streamUrl: liveUrl, playbackType: "live" };
+    }
+
+    return {
+      blocked: true,
+      reason: "Live stream not available",
+    };
+  }
+
+  /* ---------------- SCHEDULED ---------------- */
+  if (event.eventType === "scheduled") {
+    // ❌ Before scheduled start
     if (startTime && now < startTime) {
       return {
         blocked: true,
@@ -50,30 +69,25 @@ function resolveStreamUrl(event) {
       };
     }
 
-    if (endTime && now > endTime) {
-      if (event.vodStatus === "READY" && vodUrl) {
-        return { streamUrl: vodUrl, playbackType: "vod" };
-      }
-
-      return {
-        blocked: true,
-        reason: "Event has ended",
-      };
+    // ✅ After live stops → VOD only when ready
+    if (isVodReady && vodUrl) {
+      return { streamUrl: vodUrl, playbackType: "vod" };
     }
 
+    // ✅ During scheduled live window
     if (liveUrl) {
       return { streamUrl: liveUrl, playbackType: "live" };
     }
 
     return {
       blocked: true,
-      reason: "Live stream not available yet",
+      reason: "Live stream not available",
     };
   }
 
   /* ---------------- VOD ---------------- */
   if (event.eventType === "vod") {
-    if (event.vodStatus === "READY" && vodUrl) {
+    if (isVodReady && vodUrl) {
       return { streamUrl: vodUrl, playbackType: "vod" };
     }
 
@@ -88,6 +102,10 @@ function resolveStreamUrl(event) {
     reason: "Unsupported event type",
   };
 }
+
+
+
+
 
 /* =========================================================
    PLAYBACK CONTROLLER
