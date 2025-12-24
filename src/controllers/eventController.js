@@ -223,7 +223,6 @@ export default class EventController {
 
         paymentAmount,
         currency,
-        accessPasswordHash,
         accessPassword,
       } = payload;
 
@@ -582,14 +581,7 @@ export default class EventController {
 
       // ---- password access ----
       if (payload.accessPassword) {
-        updated.accessPassword = await bcrypt.hash(
-          payload.accessPassword,
-          SALT_ROUNDS
-        );
-      }
-
-      if (payload.accessPasswordHash) {
-        updated.accessPassword = payload.accessPasswordHash;
+        updated.accessPassword = payload.accessPassword;
       }
 
       // ---- paid access ----
