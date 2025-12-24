@@ -309,7 +309,6 @@ export default class EventController {
       }
 
       // ---------------- ACCESS MODE ----------------
-      let finalPasswordHash = null;
       let finalRegFields = null;
       let finalPayment = null;
       let finalCurrency = null;
@@ -328,6 +327,7 @@ export default class EventController {
       }
 
       if (accessMode === "paidAccess") {
+        finalRegFields = registrationFields || [];
         finalPayment = Number(paymentAmount);
         finalCurrency = resolveCurrency(currency);
       }
@@ -367,7 +367,7 @@ export default class EventController {
 
         registrationFields: finalRegFields,
 
-        accessPassword: finalPasswordHash,
+        accessPassword: accessPassword,
         paymentAmount: finalPayment,
         currency: finalCurrency,
 
