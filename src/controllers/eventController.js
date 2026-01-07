@@ -4,6 +4,7 @@ import {
   ScanCommand,
   GetCommand,
   DeleteCommand,
+  UpdateCommand
 } from "../config/awsClients.js";
 
 import {
@@ -18,10 +19,15 @@ import {
   StopChannelCommand,
   DeleteChannelCommand,
   DeleteInputCommand,
+  DescribeChannelCommand,
+  DeleteInputSecurityGroupCommand
 } from "@aws-sdk/client-medialive";
 
 import {
   MediaPackageClient,
+  DeleteOriginEndpointCommand,
+  DescribeOriginEndpointCommand,
+  DescribeChannelCommand as DescribeMediaPackageChannelCommand,
   DeleteChannelCommand as DeleteMediaPackageChannelCommand,
 } from "@aws-sdk/client-mediapackage";
 
@@ -69,6 +75,8 @@ const mediaPackageClient = new MediaPackageClient({ region });
    HELPERS
 ====================================================== */
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 const nowISO = () => new Date().toISOString();
 
 const toIsoString = (value) => {
@@ -106,12 +114,14 @@ const resolveCurrency = (value) => {
 /** Delete all objects under an S3 prefix */
 async function deleteS3Prefix(bucket, prefix) {
   let token;
+  // Ensure prefix ends with / if it's meant to be a folder
+  const folderPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
 
   do {
     const res = await s3Client.send(
       new ListObjectsV2Command({
         Bucket: bucket,
-        Prefix: prefix,
+        Prefix: folderPrefix,
         ContinuationToken: token,
       })
     );
@@ -159,6 +169,249 @@ async function deleteCloudFrontDistribution(distributionId) {
     })
   );
 }
+
+async function waitForChannelState(channelId, desiredState) {
+  while (true) {
+    const { State } = await mediaLiveClient.send(
+      new DescribeChannelCommand({ ChannelId: channelId })
+    );
+
+    if (State === desiredState) return;
+    console.log(`Waiting for channel ${channelId} to reach ${desiredState}, current=${State}`);
+    await sleep(15000);
+  }
+}
+
+async function waitForChannelDeletion(channelId, timeoutMs = 15 * 60 * 1000) {
+  const start = Date.now();
+
+  while (true) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `Timeout waiting for MediaLive channel ${channelId} deletion`
+      );
+    }
+
+    try {
+      const res = await mediaLiveClient.send(
+        new DescribeChannelCommand({ ChannelId: channelId })
+      );
+
+      console.log(
+        `Channel ${channelId} state: ${res.State} (waiting for deletion)`
+      );
+
+      // Channel still exists in any state → wait
+      await sleep(15000);
+
+    } catch (err) {
+      const statusCode = err?.$metadata?.httpStatusCode;
+
+      // NOW it's really gone
+      if (
+        err.name === "NotFoundException" ||
+        statusCode === 404 ||
+        err.message?.toLowerCase().includes("not found")
+      ) {
+        console.log(`Channel ${channelId} fully deleted`);
+        return;
+      }
+
+      throw err; // unexpected error
+    }
+  }
+}
+
+
+
+async function cleanupCloudFront(distributionId, cacheBehaviorIds, originId) {
+  // ✅ Normalize to Set for fastest lookup
+  const behaviorSet = cacheBehaviorIds instanceof Set
+    ? cacheBehaviorIds
+    : new Set(cacheBehaviorIds);
+
+  const { DistributionConfig, ETag } = await cloudFrontClient.send(
+    new GetDistributionConfigCommand({ Id: distributionId })
+  );
+
+  /* ================= REMOVE CACHE BEHAVIORS ================= */
+  if (DistributionConfig.CacheBehaviors?.Items?.length) {
+
+    DistributionConfig.CacheBehaviors.Items =
+      DistributionConfig.CacheBehaviors.Items.filter(
+        b => !behaviorSet.has(b.PathPattern)
+      );
+
+    DistributionConfig.CacheBehaviors.Quantity =
+      DistributionConfig.CacheBehaviors.Items.length;
+
+    await cloudFrontClient.send(
+      new UpdateDistributionCommand({
+        Id: distributionId,
+        IfMatch: ETag,
+        DistributionConfig
+      })
+    );
+  }
+
+  /* ================= REMOVE ORIGIN ================= */
+  const updated = await cloudFrontClient.send(
+    new GetDistributionConfigCommand({ Id: distributionId })
+  );
+
+  updated.DistributionConfig.Origins.Items =
+    updated.DistributionConfig.Origins.Items.filter(
+      o => o.Id !== originId
+    );
+
+  updated.DistributionConfig.Origins.Quantity =
+    updated.DistributionConfig.Origins.Items.length;
+
+  await cloudFrontClient.send(
+    new UpdateDistributionCommand({
+      Id: distributionId,
+      IfMatch: updated.ETag,
+      DistributionConfig: updated.DistributionConfig
+    })
+  );
+}
+
+
+async function performAsyncDeletion(eventId, event) {
+  try {
+    console.log(`Starting async deletion for event: ${eventId}`);
+
+    const now = new Date();
+    const eventStartTime = new Date(event.startTime);
+    console.log("Now:", now.toISOString());
+    console.log("Event Start:", eventStartTime.toISOString());
+
+
+
+    /* ================= LIVE CLEANUP ================= */
+    if (event.eventType === "live" || (event.eventType === "scheduled" && now >= eventStartTime)) {
+      console.log("Starting live event resource cleanup...");
+
+      /* 1️⃣ Stop & Delete MediaLive Channel */
+      if (event.mediaLiveChannelId) {
+        const { State } = await mediaLiveClient.send(
+          new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
+        );
+
+        if (State === "RUNNING") {
+          await mediaLiveClient.send(
+            new StopChannelCommand({ ChannelId: event.mediaLiveChannelId })
+          );
+          await waitForChannelState(event.mediaLiveChannelId, "IDLE");
+        }
+
+        await mediaLiveClient.send(
+          new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
+        );
+        await sleep(30000);
+      }
+
+      /* 2️⃣ Delete Input & Security Group */
+      if (event.mediaLiveInputId) {
+        await mediaLiveClient.send(
+          new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+        );
+        await sleep(15000);
+      }
+
+      if (event.mediaLiveInputSecurityGroupId) {
+        await mediaLiveClient.send(
+          new DeleteInputSecurityGroupCommand({
+            InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
+          })
+        );
+      }
+
+      /* 3️⃣ MediaPackage */
+      if (event.mediaPackageEndpointId) {
+        await mediaPackageClient.send(
+          new DeleteOriginEndpointCommand({
+            Id: event.mediaPackageEndpointId,
+            ChannelId: event.mediaPackageChannelId
+          })
+        );
+        await sleep(10000);
+      }
+
+      if (event.mediaPackageChannelId) {
+        await mediaPackageClient.send(
+          new DeleteMediaPackageChannelCommand({
+            Id: event.mediaPackageChannelId
+          })
+        );
+      }
+
+      /* 4️⃣ CloudFront (Remove behavior → origin) */
+      if (event.distributionId && event.cacheBehaviorIds && event.originId) {
+        await cleanupCloudFront(
+          event.distributionId,
+          event.cacheBehaviorIds,
+          event.originId
+        );
+      }
+
+      /* 5️⃣ S3 Cleanup */
+      if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+        await deleteS3Prefix(
+          event.s3RecordingBucket,
+          event.s3RecordingPrefix
+        );
+      }
+    }
+
+    /* ---------- VOD CLEANUP ---------- */
+    if (event.eventType === "vod") {
+      console.log("Starting VOD event resource cleanup...");
+      if (event.s3Prefix) {
+        await deleteS3Prefix(VOD_BUCKET, event.s3Prefix);
+      }
+      if (event.vodOutputPath) {
+        await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
+      }
+    }
+
+    /* ================= DELETE DB RECORD ================= */
+    await ddbDocClient.send(
+      new DeleteCommand({
+        TableName: EVENTS_TABLE,
+        Key: { eventId }
+      })
+    );
+
+    console.log(`Successfully deleted event: ${eventId}`);
+
+  } catch (err) {
+    console.error(`Async deletion failed for event ${eventId}:`, err);
+
+    // Revert status on failure
+    try {
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+          UpdateExpression: "SET isDeletionInProgress = :status, deletionError = :error, deletionFailedAt = :timestamp",
+          ExpressionAttributeValues: {
+            ":status": false,
+            ":error": err.message || "Unknown error during deletion",
+            ":timestamp": new Date().toISOString()
+          }
+        })
+      );
+      console.log(`Reverted deletion status for event: ${eventId}`);
+    } catch (revertErr) {
+      console.error(`Failed to revert status for event ${eventId}:`, revertErr);
+    }
+
+    throw err; // Re-throw for logging
+  }
+}
+
+
 
 // =======================================================
 //        EVENT CONTROLLER
@@ -650,6 +903,220 @@ export default class EventController {
   //   }
   // }
 
+  // static async deleteEvent(req, res) {
+  //   try {
+  //     const { eventId } = req.params;
+
+  //     const { Item: event } = await ddbDocClient.send(
+  //       new GetCommand({
+  //         TableName: EVENTS_TABLE,
+  //         Key: { eventId },
+  //       })
+  //     );
+
+  //     if (!event)
+  //       return res.status(404).json({ success: false, message: "Event not found" });
+
+  //     /* ---------- LIVE CLEANUP ---------- */
+  //     if (event.eventType === "live") {
+  //       if (event.mediaLiveChannelId) {
+  //         await mediaLiveClient.send(
+  //           new StopChannelCommand({ ChannelId: event.mediaLiveChannelId })
+  //         );
+  //         await mediaLiveClient.send(
+  //           new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
+  //         );
+  //       }
+
+  //       if (event.mediaLiveInputId) {
+  //         await mediaLiveClient.send(
+  //           new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+  //         );
+  //       }
+
+  //       if (event.mediaPackageChannelId) {
+  //         await mediaPackageClient.send(
+  //           new DeleteMediaPackageChannelCommand({
+  //             Id: event.mediaPackageChannelId,
+  //           })
+  //         );
+  //       }
+
+  //       if (event.distributionId) {
+  //         await deleteCloudFrontDistribution(event.distributionId);
+  //       }
+
+  //       if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+  //         await deleteS3Prefix(
+  //           event.s3RecordingBucket,
+  //           event.s3RecordingPrefix
+  //         );
+  //       }
+  //     }
+
+  //     /* ---------- VOD CLEANUP ---------- */
+  //     if (event.eventType === "vod") {
+  //       if (event.s3Prefix) {
+  //         await deleteS3Prefix(VOD_BUCKET, event.s3Prefix);
+  //       }
+  //       if (event.vodOutputPath) {
+  //         await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
+  //       }
+  //     }
+
+  //     await ddbDocClient.send(
+  //       new DeleteCommand({
+  //         TableName: EVENTS_TABLE,
+  //         Key: { eventId },
+  //       })
+  //     );
+
+  //     return res.status(200).json({
+  //       success: true,
+  //       message: "Event and all related resources deleted successfully",
+  //     });
+  //   } catch (err) {
+  //     console.error("Delete event error:", err);
+  //     return res.status(500).json({
+  //       success: false,
+  //       message: err.message || "Failed to delete event",
+  //     });
+  //   }
+  // }
+
+  // static async deleteEvent(req, res) {
+  //   try {
+  //     const { eventId } = req.params;
+
+  //     const { Item: event } = await ddbDocClient.send(
+  //       new GetCommand({
+  //         TableName: EVENTS_TABLE,
+  //         Key: { eventId }
+  //       })
+  //     );
+
+  //     console.log("Fetched event for deletion:", event);
+
+  //     if (!event) {
+  //       return res.status(404).json({ success: false, message: "Event not found" });
+  //     }
+
+  //     /* ================= LIVE CLEANUP ================= */
+  //     if (event.eventType === "live") {
+  //       console.log("Starting live event resource cleanup...");
+
+  //       /* 1️⃣ Stop & Delete MediaLive Channel */
+  //       if (event.mediaLiveChannelId) {
+  //         const { State } = await mediaLiveClient.send(
+  //           new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
+  //         );
+
+  //         if (State === "RUNNING") {
+  //           await mediaLiveClient.send(
+  //             new StopChannelCommand({ ChannelId: event.mediaLiveChannelId })
+  //           );
+  //           await waitForChannelState(event.mediaLiveChannelId, "IDLE");
+  //         }
+
+  //         await mediaLiveClient.send(
+  //           new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
+  //         );
+
+  //         // await waitForChannelDeletion(event.mediaLiveChannelId);
+  //         await sleep(30000);
+  //       }
+
+  //       /* 2️⃣ Delete Input & Security Group */
+  //       if (event.mediaLiveInputId) {
+  //         await mediaLiveClient.send(
+  //           new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+  //         );
+  //         await sleep(15000);
+  //       }
+
+  //       if (event.mediaLiveInputSecurityGroupId) {
+  //         await mediaLiveClient.send(
+  //           new DeleteInputSecurityGroupCommand({
+  //             InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
+  //           })
+  //         );
+  //       }
+
+  //       /* 3️⃣ MediaPackage */
+  //       if (event.mediaPackageEndpointId) {
+  //         await mediaPackageClient.send(
+  //           new DeleteOriginEndpointCommand({
+  //             Id: event.mediaPackageEndpointId,
+  //             ChannelId: event.mediaPackageChannelId
+  //           })
+  //         );
+  //         await sleep(10000);
+  //       }
+
+  //       if (event.mediaPackageChannelId) {
+  //         await mediaPackageClient.send(
+  //           new DeleteMediaPackageChannelCommand({
+  //             Id: event.mediaPackageChannelId
+  //           })
+  //         );
+  //       }
+
+  //       /* 4️⃣ CloudFront (Remove behavior → origin) */
+  //       if (
+  //         event.distributionId &&
+  //         event.cacheBehaviorIds &&
+  //         event.originId
+  //       ) {
+  //         await cleanupCloudFront(
+  //           event.distributionId,
+  //           event.cacheBehaviorIds,
+  //           event.originId
+  //         );
+  //       }
+
+  //       /* 5️⃣ S3 Cleanup */
+  //       if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+  //         await deleteS3Prefix(
+  //           event.s3RecordingBucket,
+  //           event.s3RecordingPrefix
+  //         );
+  //       }
+  //     }
+
+  //     /* ---------- VOD CLEANUP ---------- */
+  //     if (event.eventType === "vod") {
+  //       if (event.s3Prefix) {
+  //         await deleteS3Prefix(VOD_BUCKET, event.s3Prefix);
+  //       }
+  //       if (event.vodOutputPath) {
+  //         await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
+  //       }
+  //     }
+
+
+  //     /* ================= DELETE DB RECORD ================= */
+  //     await ddbDocClient.send(
+  //       new DeleteCommand({
+  //         TableName: EVENTS_TABLE,
+  //         Key: { eventId }
+  //       })
+  //     );
+
+  //     return res.status(200).json({
+  //       success: true,
+  //       message: "Event and all associated resources deleted successfully"
+  //     });
+
+  //   } catch (err) {
+  //     console.error("Delete event error:", err);
+  //     return res.status(500).json({
+  //       success: false,
+  //       message: err.message || "Failed to delete event"
+  //     });
+  //   }
+  // }
+
+
   static async deleteEvent(req, res) {
     try {
       const { eventId } = req.params;
@@ -657,77 +1124,56 @@ export default class EventController {
       const { Item: event } = await ddbDocClient.send(
         new GetCommand({
           TableName: EVENTS_TABLE,
-          Key: { eventId },
+          Key: { eventId }
         })
       );
 
-      if (!event)
+      console.log("Fetched event for deletion:", event);
+
+      if (!event) {
         return res.status(404).json({ success: false, message: "Event not found" });
-
-      /* ---------- LIVE CLEANUP ---------- */
-      if (event.eventType === "live") {
-        if (event.mediaLiveChannelId) {
-          await mediaLiveClient.send(
-            new StopChannelCommand({ ChannelId: event.mediaLiveChannelId })
-          );
-          await mediaLiveClient.send(
-            new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
-          );
-        }
-
-        if (event.mediaLiveInputId) {
-          await mediaLiveClient.send(
-            new DeleteInputCommand({ InputId: event.mediaLiveInputId })
-          );
-        }
-
-        if (event.mediaPackageChannelId) {
-          await mediaPackageClient.send(
-            new DeleteMediaPackageChannelCommand({
-              Id: event.mediaPackageChannelId,
-            })
-          );
-        }
-
-        if (event.distributionId) {
-          await deleteCloudFrontDistribution(event.distributionId);
-        }
-
-        if (event.s3RecordingBucket && event.s3RecordingPrefix) {
-          await deleteS3Prefix(
-            event.s3RecordingBucket,
-            event.s3RecordingPrefix
-          );
-        }
       }
 
-      /* ---------- VOD CLEANUP ---------- */
-      if (event.eventType === "vod") {
-        if (event.s3Prefix) {
-          await deleteS3Prefix(VOD_BUCKET, event.s3Prefix);
-        }
-        if (event.vodOutputPath) {
-          await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
-        }
+      // Check if already being deleted
+      if (event.isDeletionInProgress) {
+        return res.status(409).json({
+          success: false,
+          message: "Event deletion already in progress"
+        });
       }
 
+      // Update status to InProgress
       await ddbDocClient.send(
-        new DeleteCommand({
+        new UpdateCommand({
           TableName: EVENTS_TABLE,
           Key: { eventId },
+          UpdateExpression: "SET isDeletionInProgress = :status, deletionStartedAt = :timestamp",
+          ExpressionAttributeValues: {
+            ":status": true,
+            ":timestamp": new Date().toISOString()
+          }
         })
       );
 
-      return res.status(200).json({
-        success: true,
-        message: "Event and all related resources deleted successfully",
+      performAsyncDeletion(eventId, event).catch(err => {
+        console.error(`Background deletion failed for event ${eventId}:`, err);
       });
+
+      // Return immediate response
+      res.status(202).json({
+        success: true,
+        message: "Event deletion initiated successfully",
+        eventId,
+        status: "InProgress"
+      });
+
     } catch (err) {
       console.error("Delete event error:", err);
       return res.status(500).json({
         success: false,
-        message: err.message || "Failed to delete event",
+        message: err.message || "Failed to initiate event deletion"
       });
     }
   }
+
 }
