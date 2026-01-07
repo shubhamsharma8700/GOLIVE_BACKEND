@@ -280,11 +280,15 @@ async function cleanupCloudFront(distributionId, cacheBehaviorIds, originId) {
 async function performAsyncDeletion(eventId, event) {
   try {
     console.log(`Starting async deletion for event: ${eventId}`);
+    let now;
+    let eventStartTime;
 
-    const now = new Date();
-    const eventStartTime = new Date(event.startTime);
-    console.log("Now:", now.toISOString());
-    console.log("Event Start:", eventStartTime.toISOString());
+    if (event?.eventType === "live" || event?.eventType === "scheduled") {
+      now = new Date();
+      eventStartTime = new Date(event.startTime);
+      console.log("Now:", now.toISOString());
+      console.log("Event Start:", eventStartTime.toISOString());
+    }
 
 
 
