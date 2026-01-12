@@ -37,6 +37,22 @@ export default class AnalyticsController {
 
       // Trusted network context (CloudFront)
       const viewerContext = extractViewerContext(req);
+        const info = req.body?.deviceInfo || {};
+        const ua = info.userAgent || "";
+
+        const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
+
+        let browser = null;
+        if (/Chrome/i.test(ua)) browser = "Chrome";
+        else if (/Firefox/i.test(ua)) browser = "Firefox";
+        else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+        else if (/Edge/i.test(ua)) browser = "Edge";
+
+        let os = null;
+        if (/Windows/i.test(ua)) os = "Windows";
+        else if (/Mac OS/i.test(ua)) os = "MacOS";
+        else if (/Android/i.test(ua)) os = "Android";
+        else if (/iPhone|iPad/i.test(ua)) os = "iOS";
 
       /* ---------------- SESSION ITEM ---------------- */
       const sessionItem = {
@@ -49,13 +65,23 @@ export default class AnalyticsController {
         viewerToken: viewer.viewerToken,
         playbackType: req.body?.playbackType || "vod",
 
-        device: {
+        /*device: {
           deviceType: req.body?.deviceInfo?.deviceType || null,
           userAgent: req.body?.deviceInfo?.userAgent || null,
           browser: req.body?.deviceInfo?.browser || null,
           os: req.body?.deviceInfo?.os || null,
           screen: req.body?.deviceInfo?.screen || null,
           timezone: req.body?.deviceInfo?.timezone || null,
+        }, */
+      
+
+        device: {
+          deviceType,
+          userAgent: ua,
+          browser,
+          os,
+          screen: info.screen || null,
+          timezone: info.timezone || null,
         },
 
         network: viewerContext,
@@ -87,13 +113,22 @@ export default class AnalyticsController {
             SET
               lastJoinAt = :now,
               lastActiveAt = :now,
-              updatedAt = :now
+              updatedAt = :now,
+              device = :device
             ADD
               totalSessions :one
           `,
           ExpressionAttributeValues: {
             ":now": now,
             ":one": 1,
+             ":device": {
+              deviceType,
+              browser,
+              os,
+              userAgent: ua,
+              screen: info.screen || null,
+              timezone: info.timezone || null
+            }
           },
         })
       );

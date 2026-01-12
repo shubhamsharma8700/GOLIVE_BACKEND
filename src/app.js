@@ -58,14 +58,22 @@ app.post(
   express.raw({ type: "application/json" }),
   PaymentsController.webhook
 );
+// Important: reset JSON parser AFTER webhook
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/payments/stripe/webhook") {
+    next();
+  } else {
+    express.json()(req, res, next);
+  }
+});
 
 // AFTER webhook route
-app.use(express.json());
+//app.use(express.json());
 
 /* ======================================================
    JSON body parser (AFTER webhook)
 ====================================================== */
-app.use(bodyParser.json());
+//app.use(bodyParser.json());
 
 app.use(cookieParser());
 
