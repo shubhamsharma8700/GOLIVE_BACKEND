@@ -44,12 +44,13 @@ export default class AnalyticsController {
         const ua = info.userAgent || "";
 
         const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
+        
 
         let browser = null;
-        if (/Chrome/i.test(ua)) browser = "Chrome";
+        if (/Edg/i.test(ua)) browser = "Edge";
+        else if (/Chrome/i.test(ua)) browser = "Chrome";
         else if (/Firefox/i.test(ua)) browser = "Firefox";
-        else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
-        else if (/Edge/i.test(ua)) browser = "Edge";
+        else if (/Safari/i.test(ua)) browser = "Safari";
 
         let os = null;
         if (/Windows/i.test(ua)) os = "Windows";
