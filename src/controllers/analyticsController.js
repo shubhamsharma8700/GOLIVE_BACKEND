@@ -114,13 +114,13 @@ export default class AnalyticsController {
               lastJoinAt = :now,
               lastActiveAt = :now,
               updatedAt = :now,
-              device = :device
-            ADD
-              totalSessions :one
+              device = :device,
+              totalSessions = if_not_exists(totalSessions, :zero) + :one
           `,
           ExpressionAttributeValues: {
             ":now": now,
             ":one": 1,
+            ":zero": 0,
              ":device": {
               deviceType,
               browser,
@@ -231,12 +231,15 @@ export default class AnalyticsController {
             clientViewerId,
           },
           UpdateExpression: `
-            ADD totalWatchTime :sec
-            SET lastActiveAt = :now, updatedAt = :now
+            SET
+              totalWatchTime = if_not_exists(totalWatchTime, :zero) + :sec,
+              lastActiveAt = :now,
+              updatedAt = :now
           `,
           ExpressionAttributeValues: {
             ":sec": increment,
             ":now": now,
+            ":zero": 0
           },
         })
       );
