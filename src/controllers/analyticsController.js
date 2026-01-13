@@ -33,7 +33,10 @@ export default class AnalyticsController {
       }
 
       const sessionId = uuidv4();
-      const now = nowISO();
+      //const now = nowISO();
+      const nowISOTime = new Date().toISOString();   // for logs & UI
+      const nowEpoch = Date.now();                  // for GSI & queries
+
 
       // Trusted network context (CloudFront)
       const viewerContext = extractViewerContext(req);
@@ -86,11 +89,11 @@ export default class AnalyticsController {
 
         network: viewerContext,
 
-        startTime: now,
+        startTime: nowISOTime,
         endTime: null,
         duration: 0,
 
-        createdAt: now,
+        createdAt: nowISOTime,
       };
 
       /* ---------------- SAVE SESSION ---------------- */
@@ -111,14 +114,15 @@ export default class AnalyticsController {
           },
           UpdateExpression: `
             SET
-              lastJoinAt = :now,
-              lastActiveAt = :now,
-              updatedAt = :now,
+              lastJoinAt = :iso,
+              lastActiveAt = :epoch,
+              updatedAt = :iso,
               device = :device,
               totalSessions = if_not_exists(totalSessions, :zero) + :one
           `,
           ExpressionAttributeValues: {
-            ":now": now,
+            ":iso": nowISOTime,
+            ":epoch": nowEpoch,
             ":one": 1,
             ":zero": 0,
              ":device": {
@@ -205,7 +209,9 @@ export default class AnalyticsController {
       }
 
       const increment = Math.max(0, Number(seconds) || 0);
-      const now = nowISO();
+      //const now = nowISO();
+      const nowISOTime = new Date().toISOString();
+      const nowEpoch = Date.now();
 
       /* ---------------- UPDATE SESSION ---------------- */
       await ddbDocClient.send(
@@ -233,12 +239,13 @@ export default class AnalyticsController {
           UpdateExpression: `
             SET
               totalWatchTime = if_not_exists(totalWatchTime, :zero) + :sec,
-              lastActiveAt = :now,
-              updatedAt = :now
+              lastActiveAt = :epoch,
+              updatedAt = :iso
           `,
           ExpressionAttributeValues: {
             ":sec": increment,
-            ":now": now,
+            ":epoch": nowEpoch,
+            ":iso": nowISOTime,
             ":zero": 0
           },
         })
