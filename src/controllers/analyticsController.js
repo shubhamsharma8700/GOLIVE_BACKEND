@@ -40,23 +40,23 @@ export default class AnalyticsController {
 
       // Trusted network context (CloudFront)
       const viewerContext = extractViewerContext(req);
-        const info = req.body?.deviceInfo || {};
-        const ua = info.userAgent || "";
+      const info = req.body?.deviceInfo || {};
+      const ua = info.userAgent || "";
 
-        const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
-        
+      const deviceType = /Mobi|Android/i.test(ua) ? "mobile" : "desktop";
 
-        let browser = null;
-        if (/Edg/i.test(ua)) browser = "Edge";
-        else if (/Chrome/i.test(ua)) browser = "Chrome";
-        else if (/Firefox/i.test(ua)) browser = "Firefox";
-        else if (/Safari/i.test(ua)) browser = "Safari";
 
-        let os = null;
-        if (/Windows/i.test(ua)) os = "Windows";
-        else if (/Mac OS/i.test(ua)) os = "MacOS";
-        else if (/Android/i.test(ua)) os = "Android";
-        else if (/iPhone|iPad/i.test(ua)) os = "iOS";
+      let browser = null;
+      if (/Edg/i.test(ua)) browser = "Edge";
+      else if (/Chrome/i.test(ua)) browser = "Chrome";
+      else if (/Firefox/i.test(ua)) browser = "Firefox";
+      else if (/Safari/i.test(ua)) browser = "Safari";
+
+      let os = null;
+      if (/Windows/i.test(ua)) os = "Windows";
+      else if (/Mac OS/i.test(ua)) os = "MacOS";
+      else if (/Android/i.test(ua)) os = "Android";
+      else if (/iPhone|iPad/i.test(ua)) os = "iOS";
 
       /* ---------------- SESSION ITEM ---------------- */
       const sessionItem = {
@@ -77,7 +77,7 @@ export default class AnalyticsController {
           screen: req.body?.deviceInfo?.screen || null,
           timezone: req.body?.deviceInfo?.timezone || null,
         }, */
-      
+
 
         device: {
           deviceType,
@@ -113,6 +113,7 @@ export default class AnalyticsController {
             eventId,
             clientViewerId: viewer.clientViewerId,
           },
+          ConditionExpression: "attribute_exists(eventId)",
           UpdateExpression: `
             SET
               lastJoinAt = :iso,
@@ -126,7 +127,7 @@ export default class AnalyticsController {
             ":epoch": nowEpoch,
             ":one": 1,
             ":zero": 0,
-             ":device": {
+            ":device": {
               deviceType,
               browser,
               os,
@@ -237,6 +238,7 @@ export default class AnalyticsController {
             eventId,
             clientViewerId,
           },
+          ConditionExpression: "attribute_exists(eventId)",
           UpdateExpression: `
             SET
               totalWatchTime = if_not_exists(totalWatchTime, :zero) + :sec,
