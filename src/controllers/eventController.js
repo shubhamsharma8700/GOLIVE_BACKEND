@@ -290,14 +290,32 @@ async function performAsyncDeletion(eventId, event) {
       console.log("Event Start:", eventStartTime.toISOString());
     }
 
-
-
     /* ================= LIVE CLEANUP ================= */
     if (event.eventType === "live" || (event.eventType === "scheduled" && now >= eventStartTime)) {
       console.log("Starting live event resource cleanup...");
 
-      /* 1️⃣ Stop & Delete MediaLive Channel */
+      // Check if channel exists before proceeding with cleanup
+      let channelExists = false;
       if (event.mediaLiveChannelId) {
+        try {
+          await mediaLiveClient.send(
+            new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
+          );
+          channelExists = true;
+          console.log(`Channel ${event.mediaLiveChannelId} exists, proceeding with full cleanup`);
+        } catch (err) {
+          if (err.name === "NotFoundException") {
+            console.log(`Channel ${event.mediaLiveChannelId} not found, skipping resource cleanup`);
+            channelExists = false;
+          } else {
+            throw err; // Re-throw if it's a different error
+          }
+        }
+      }
+
+      // Only proceed with resource cleanup if channel exists
+      if (channelExists) {
+        /* 1️⃣ Stop & Delete MediaLive Channel */
         const { State } = await mediaLiveClient.send(
           new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
         );
@@ -313,58 +331,58 @@ async function performAsyncDeletion(eventId, event) {
           new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
         );
         await sleep(30000);
-      }
 
-      /* 2️⃣ Delete Input & Security Group */
-      if (event.mediaLiveInputId) {
-        await mediaLiveClient.send(
-          new DeleteInputCommand({ InputId: event.mediaLiveInputId })
-        );
-        await sleep(15000);
-      }
+        /* 2️⃣ Delete Input & Security Group */
+        if (event.mediaLiveInputId) {
+          await mediaLiveClient.send(
+            new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+          );
+          await sleep(15000);
+        }
 
-      if (event.mediaLiveInputSecurityGroupId) {
-        await mediaLiveClient.send(
-          new DeleteInputSecurityGroupCommand({
-            InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
-          })
-        );
-      }
+        if (event.mediaLiveInputSecurityGroupId) {
+          await mediaLiveClient.send(
+            new DeleteInputSecurityGroupCommand({
+              InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
+            })
+          );
+        }
 
-      /* 3️⃣ MediaPackage */
-      if (event.mediaPackageEndpointId) {
-        await mediaPackageClient.send(
-          new DeleteOriginEndpointCommand({
-            Id: event.mediaPackageEndpointId,
-            ChannelId: event.mediaPackageChannelId
-          })
-        );
-        await sleep(10000);
-      }
+        /* 3️⃣ MediaPackage */
+        if (event.mediaPackageEndpointId) {
+          await mediaPackageClient.send(
+            new DeleteOriginEndpointCommand({
+              Id: event.mediaPackageEndpointId,
+              ChannelId: event.mediaPackageChannelId
+            })
+          );
+          await sleep(10000);
+        }
 
-      if (event.mediaPackageChannelId) {
-        await mediaPackageClient.send(
-          new DeleteMediaPackageChannelCommand({
-            Id: event.mediaPackageChannelId
-          })
-        );
-      }
+        if (event.mediaPackageChannelId) {
+          await mediaPackageClient.send(
+            new DeleteMediaPackageChannelCommand({
+              Id: event.mediaPackageChannelId
+            })
+          );
+        }
 
-      /* 4️⃣ CloudFront (Remove behavior → origin) */
-      if (event.distributionId && event.cacheBehaviorIds && event.originId) {
-        await cleanupCloudFront(
-          event.distributionId,
-          event.cacheBehaviorIds,
-          event.originId
-        );
-      }
+        /* 4️⃣ CloudFront (Remove behavior → origin) */
+        if (event.distributionId && event.cacheBehaviorIds && event.originId) {
+          await cleanupCloudFront(
+            event.distributionId,
+            event.cacheBehaviorIds,
+            event.originId
+          );
+        }
 
-      /* 5️⃣ S3 Cleanup */
-      if (event.s3RecordingBucket && event.s3RecordingPrefix) {
-        await deleteS3Prefix(
-          event.s3RecordingBucket,
-          event.s3RecordingPrefix
-        );
+        /* 5️⃣ S3 Cleanup */
+        if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+          await deleteS3Prefix(
+            event.s3RecordingBucket,
+            event.s3RecordingPrefix
+          );
+        }
       }
     }
 
