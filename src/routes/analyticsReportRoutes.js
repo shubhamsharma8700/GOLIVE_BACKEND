@@ -1,5 +1,5 @@
 import express from "express";
-import { getAnalyticsByEventId } from "../controllers/analyticsSendController.js";
+import { getAnalyticsByEventId } from "../controllers/analyticsReportController.js";
 
 const router = express.Router();
 

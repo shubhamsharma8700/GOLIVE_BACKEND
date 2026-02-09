@@ -210,6 +210,27 @@ const router = express.Router();
 router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
 
 /* ============================================================
+   DOWNLOAD VOD (Presigned URL)
+   ============================================================ */
+/**
+ * @swagger
+ * /api/events/vod/download/{eventId}:
+ *   get:
+ *     summary: Generate presigned download URL for full VOD MP4
+ *     tags: [Events]
+ *     parameters:
+ *       - in: path
+ *         name: eventId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Presigned download URL returned
+ */
+router.get("/vod/download/:eventId", EventController.downloadVod);
+
+/* ============================================================
    2. CREATE EVENT
    ============================================================ */
 /**

@@ -12,10 +12,10 @@ const REGION = process.env.AWS_REGION || "ap-south-1";
 // ----------------------
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-  DynamoDBDocumentClient,
-  PutCommand,
-  GetCommand,
   DeleteCommand,
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
   QueryCommand,
   ScanCommand,
   UpdateCommand
@@ -32,10 +32,7 @@ export const ddbDocClient = DynamoDBDocumentClient.from(ddbClient, {
 
 // Export DynamoDB Commands
 export {
-  PutCommand,
-  GetCommand,
-  DeleteCommand,
-  QueryCommand,
+  DeleteCommand, GetCommand, PutCommand, QueryCommand,
   ScanCommand,
   UpdateCommand
 };
@@ -44,7 +41,7 @@ export {
 // ----------------------
 // MEDIALIVE (v3)
 // ----------------------
-import { MediaLiveClient } from "@aws-sdk/client-medialive";
+  import { MediaLiveClient } from "@aws-sdk/client-medialive";
 export const medialive = new MediaLiveClient({ region: REGION });
 
 
@@ -93,7 +90,7 @@ export const budgets = new BudgetsClient({ region: REGION });
 // ----------------------
 // STS (Check AWS Identity)
 // ----------------------
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 export const sts = new STSClient({ region: REGION });
 
 sts.send(new GetCallerIdentityCommand({}))
@@ -111,3 +108,4 @@ sts.send(new GetCallerIdentityCommand({}))
 export const ADMIN_TABLE_NAME = process.env.ADMIN_TABLE_NAME;
 export const EVENTS_TABLE_NAME = process.env.EVENTS_TABLE_NAME;
 export const USERS_TABLE_NAME = process.env.USERS_TABLE_NAME;
+export const ANALYTICS_TABLE = process.env.ANALYTICS_TABLE;
