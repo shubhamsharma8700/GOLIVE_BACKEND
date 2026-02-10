@@ -8,6 +8,7 @@ import {
 
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
+import { sendPasswordFromServer } from "../utils/sendPasswordFromServer.js";
 
 /* =========================================================
    STRIPE
@@ -255,6 +256,17 @@ export default class PaymentsController {
             },
           })
         );
+
+        // Send password if event requires it
+        if (event.requirePasswordForPaidAccess && event.accessPassword && viewer.email) {
+          await sendPasswordFromServer({
+            eventId,
+            email: viewer.email,
+            firstName: viewer.name || "",
+            password: event.accessPassword,
+            eventTitle: event.title,
+          });
+        }
       }
 
       return res.status(200).json({ received: true });

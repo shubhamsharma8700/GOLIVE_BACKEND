@@ -481,6 +481,7 @@ export default class EventController {
         paymentAmount,
         currency,
         accessPassword,
+        requirePasswordForPaidAccess,
       } = payload;
 
       // ---------------- BASIC VALIDATION ----------------
@@ -589,6 +590,10 @@ export default class EventController {
         finalCurrency = resolveCurrency(currency);
       }
 
+      // Store requirePasswordForPaidAccess flag
+      const finalRequirePasswordForPaidAccess =
+        accessMode === "paidAccess" ? (requirePasswordForPaidAccess ?? false) : undefined;
+
       // ---------------- STATUS ----------------
       const status =
         eventType === "live"
@@ -625,6 +630,7 @@ export default class EventController {
         registrationFields: finalRegFields,
 
         accessPassword: accessPassword,
+        requirePasswordForPaidAccess: finalRequirePasswordForPaidAccess,
         paymentAmount: finalPayment,
         currency: finalCurrency,
 

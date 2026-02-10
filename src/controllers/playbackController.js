@@ -266,7 +266,7 @@ static async registerViewer(req, res) {
       })
     );
 
-    // ---------------- PASSWORD ACCESS ----------------
+    // ---------------- PASSWORD ACCESS (for passwordAccess only, not paidAccess) ----------------
     if (event.accessMode === "passwordAccess") {
       const targetEmail = email || formData?.email;
 
