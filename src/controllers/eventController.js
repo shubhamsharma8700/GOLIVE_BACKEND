@@ -478,6 +478,9 @@ export default class EventController {
   static async downloadVod(req, res) {
     try {
       const { eventId } = req.params;
+      const resolution = req.params.resolution || "720p"; // now read resolution from path param
+
+      const allowedResolutions = ["1080p", "720p", "480p"];
 
       if (!eventId) {
         return res.status(400).json({
@@ -486,9 +489,16 @@ export default class EventController {
         });
       }
 
+      if (!allowedResolutions.includes(resolution)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid resolution. Allowed: ${allowedResolutions.join(", ")}`,
+        });
+      }
+
       const prefix = `vod-output/${eventId}/`;
 
-      // 1️ List objects under event folder
+      // 1️⃣ List objects inside event folder
       const listResponse = await s3Client.send(
         new ListObjectsV2Command({
           Bucket: VOD_BUCKET,
@@ -503,19 +513,21 @@ export default class EventController {
         });
       }
 
-      // 2️ Find MP4 file (full-length video)
+      // 2️⃣ Find MP4 matching requested resolution
       const mp4Object = listResponse.Contents.find(
-        (obj) => obj.Key && obj.Key.toLowerCase().endsWith(".mp4")
+        (obj) =>
+          obj.Key &&
+          obj.Key.toLowerCase().endsWith(`_full_${resolution}.mp4`)
       );
 
       if (!mp4Object) {
         return res.status(404).json({
           success: false,
-          message: "Full-length MP4 not found for this event",
+          message: `MP4 video not found for resolution ${resolution}`,
         });
       }
 
-      // 3️ Generate presigned URL
+      // 3️⃣ Generate presigned URL
       const getObjectCommand = new GetObjectCommand({
         Bucket: VOD_BUCKET,
         Key: mp4Object.Key,
@@ -531,6 +543,7 @@ export default class EventController {
         message: "Presigned download URL generated successfully",
         data: {
           eventId,
+          resolution,
           bucket: VOD_BUCKET,
           key: mp4Object.Key,
           downloadUrl: signedUrl,
@@ -547,6 +560,7 @@ export default class EventController {
       });
     }
   }
+
 
   // =====================================================
   // 2. CREATE EVENT  (Updated for new frontend payload)
