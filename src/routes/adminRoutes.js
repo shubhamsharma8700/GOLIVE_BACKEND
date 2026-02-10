@@ -42,6 +42,26 @@ const router = express.Router();
  *   post:
  *     summary: Register a new admin
  *     tags: [Admin]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *             properties:
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Admin registered successfully
  */
 router.post("/register", registerAdmin);
 
@@ -51,8 +71,26 @@ router.post("/register", registerAdmin);
  *   post:
  *     summary: Login as admin (access + refresh token)
  *     tags: [Admin]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Login successful
  */
 router.post("/login", login);
+
 
 /**
  * @swagger
