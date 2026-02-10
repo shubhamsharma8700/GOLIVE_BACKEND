@@ -1,46 +1,44 @@
 import {
   ddbDocClient,
+  DeleteCommand,
+  GetCommand,
   PutCommand,
   ScanCommand,
-  GetCommand,
-  DeleteCommand,
   UpdateCommand
 } from "../config/awsClients.js";
 
 import {
   CloudFrontClient,
+  DeleteDistributionCommand,
   GetDistributionConfigCommand,
   UpdateDistributionCommand,
-  DeleteDistributionCommand,
 } from "@aws-sdk/client-cloudfront";
 
 import {
-  MediaLiveClient,
-  StopChannelCommand,
   DeleteChannelCommand,
   DeleteInputCommand,
+  DeleteInputSecurityGroupCommand,
   DescribeChannelCommand,
-  DeleteInputSecurityGroupCommand
+  MediaLiveClient,
+  StopChannelCommand
 } from "@aws-sdk/client-medialive";
 
 import {
-  MediaPackageClient,
-  DeleteOriginEndpointCommand,
-  DescribeOriginEndpointCommand,
-  DescribeChannelCommand as DescribeMediaPackageChannelCommand,
   DeleteChannelCommand as DeleteMediaPackageChannelCommand,
+  DeleteOriginEndpointCommand,
+  MediaPackageClient
 } from "@aws-sdk/client-mediapackage";
 
 import {
-  S3Client,
-  ListObjectsV2Command,
   DeleteObjectsCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
+  S3Client,
 } from "@aws-sdk/client-s3";
 
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuidv4 } from "uuid";
-import bcrypt from "bcryptjs";
 
 /* ======================================================
    CONSTANTS
@@ -290,14 +288,32 @@ async function performAsyncDeletion(eventId, event) {
       console.log("Event Start:", eventStartTime.toISOString());
     }
 
-
-
     /* ================= LIVE CLEANUP ================= */
     if (event.eventType === "live" || (event.eventType === "scheduled" && now >= eventStartTime)) {
       console.log("Starting live event resource cleanup...");
 
-      /* 1️⃣ Stop & Delete MediaLive Channel */
+      // Check if channel exists before proceeding with cleanup
+      let channelExists = false;
       if (event.mediaLiveChannelId) {
+        try {
+          await mediaLiveClient.send(
+            new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
+          );
+          channelExists = true;
+          console.log(`Channel ${event.mediaLiveChannelId} exists, proceeding with full cleanup`);
+        } catch (err) {
+          if (err.name === "NotFoundException") {
+            console.log(`Channel ${event.mediaLiveChannelId} not found, skipping resource cleanup`);
+            channelExists = false;
+          } else {
+            throw err; // Re-throw if it's a different error
+          }
+        }
+      }
+
+      // Only proceed with resource cleanup if channel exists
+      if (channelExists) {
+        /* 1️⃣ Stop & Delete MediaLive Channel */
         const { State } = await mediaLiveClient.send(
           new DescribeChannelCommand({ ChannelId: event.mediaLiveChannelId })
         );
@@ -313,58 +329,58 @@ async function performAsyncDeletion(eventId, event) {
           new DeleteChannelCommand({ ChannelId: event.mediaLiveChannelId })
         );
         await sleep(30000);
-      }
 
-      /* 2️⃣ Delete Input & Security Group */
-      if (event.mediaLiveInputId) {
-        await mediaLiveClient.send(
-          new DeleteInputCommand({ InputId: event.mediaLiveInputId })
-        );
-        await sleep(15000);
-      }
+        /* 2️⃣ Delete Input & Security Group */
+        if (event.mediaLiveInputId) {
+          await mediaLiveClient.send(
+            new DeleteInputCommand({ InputId: event.mediaLiveInputId })
+          );
+          await sleep(15000);
+        }
 
-      if (event.mediaLiveInputSecurityGroupId) {
-        await mediaLiveClient.send(
-          new DeleteInputSecurityGroupCommand({
-            InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
-          })
-        );
-      }
+        if (event.mediaLiveInputSecurityGroupId) {
+          await mediaLiveClient.send(
+            new DeleteInputSecurityGroupCommand({
+              InputSecurityGroupId: event.mediaLiveInputSecurityGroupId
+            })
+          );
+        }
 
-      /* 3️⃣ MediaPackage */
-      if (event.mediaPackageEndpointId) {
-        await mediaPackageClient.send(
-          new DeleteOriginEndpointCommand({
-            Id: event.mediaPackageEndpointId,
-            ChannelId: event.mediaPackageChannelId
-          })
-        );
-        await sleep(10000);
-      }
+        /* 3️⃣ MediaPackage */
+        if (event.mediaPackageEndpointId) {
+          await mediaPackageClient.send(
+            new DeleteOriginEndpointCommand({
+              Id: event.mediaPackageEndpointId,
+              ChannelId: event.mediaPackageChannelId
+            })
+          );
+          await sleep(10000);
+        }
 
-      if (event.mediaPackageChannelId) {
-        await mediaPackageClient.send(
-          new DeleteMediaPackageChannelCommand({
-            Id: event.mediaPackageChannelId
-          })
-        );
-      }
+        if (event.mediaPackageChannelId) {
+          await mediaPackageClient.send(
+            new DeleteMediaPackageChannelCommand({
+              Id: event.mediaPackageChannelId
+            })
+          );
+        }
 
-      /* 4️⃣ CloudFront (Remove behavior → origin) */
-      if (event.distributionId && event.cacheBehaviorIds && event.originId) {
-        await cleanupCloudFront(
-          event.distributionId,
-          event.cacheBehaviorIds,
-          event.originId
-        );
-      }
+        /* 4️⃣ CloudFront (Remove behavior → origin) */
+        if (event.distributionId && event.cacheBehaviorIds && event.originId) {
+          await cleanupCloudFront(
+            event.distributionId,
+            event.cacheBehaviorIds,
+            event.originId
+          );
+        }
 
-      /* 5️⃣ S3 Cleanup */
-      if (event.s3RecordingBucket && event.s3RecordingPrefix) {
-        await deleteS3Prefix(
-          event.s3RecordingBucket,
-          event.s3RecordingPrefix
-        );
+        /* 5️⃣ S3 Cleanup */
+        if (event.s3RecordingBucket && event.s3RecordingPrefix) {
+          await deleteS3Prefix(
+            event.s3RecordingBucket,
+            event.s3RecordingPrefix
+          );
+        }
       }
     }
 
@@ -453,6 +469,82 @@ export default class EventController {
     } catch (err) {
       console.error("Presign error:", err);
       return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // =====================================================
+  // DOWNLOAD FULL VOD (MP4) USING PRESIGNED URL
+  // =====================================================
+  static async downloadVod(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      if (!eventId) {
+        return res.status(400).json({
+          success: false,
+          message: "eventId is required",
+        });
+      }
+
+      const prefix = `vod-output/${eventId}/`;
+
+      // 1️ List objects under event folder
+      const listResponse = await s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: VOD_BUCKET,
+          Prefix: prefix,
+        })
+      );
+
+      if (!listResponse.Contents || listResponse.Contents.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "No VOD files found for this event",
+        });
+      }
+
+      // 2️ Find MP4 file (full-length video)
+      const mp4Object = listResponse.Contents.find(
+        (obj) => obj.Key && obj.Key.toLowerCase().endsWith(".mp4")
+      );
+
+      if (!mp4Object) {
+        return res.status(404).json({
+          success: false,
+          message: "Full-length MP4 not found for this event",
+        });
+      }
+
+      // 3️ Generate presigned URL
+      const getObjectCommand = new GetObjectCommand({
+        Bucket: VOD_BUCKET,
+        Key: mp4Object.Key,
+        ResponseContentDisposition: `attachment; filename="${mp4Object.Key.split("/").pop()}"`,
+      });
+
+      const signedUrl = await getSignedUrl(s3Client, getObjectCommand, {
+        expiresIn: 60 * 60, // 1 hour
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Presigned download URL generated successfully",
+        data: {
+          eventId,
+          bucket: VOD_BUCKET,
+          key: mp4Object.Key,
+          downloadUrl: signedUrl,
+        },
+      });
+
+    } catch (error) {
+      console.error("VOD Download Error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to generate download URL",
+        error: error.message,
+      });
     }
   }
 

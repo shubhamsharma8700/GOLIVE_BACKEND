@@ -1,15 +1,16 @@
-import express from "express";
-import cors from "cors";
-import bodyParser from "body-parser";
 import cookieParser from "cookie-parser";
+import cors from "cors";
+import express from "express";
 
-import eventRoutes from "./routes/eventRoutes.js";
-import playbackRoutes from "./routes/playbackRoutes.js";
+import PaymentsController from "./controllers/paymentsController.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import analyticsDashRoutes from "./routes/analyticsDashRoutes.js";
+import analyticsReportRoutes from "./routes/analyticsReportRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
+import eventRoutes from "./routes/eventRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
-import PaymentsController from "./controllers/paymentsController.js";
+import playbackRoutes from "./routes/playbackRoutes.js";
 import viewerRoutes from "./routes/viewerRoutes.js";
 
 const app = express();
@@ -20,6 +21,8 @@ app.set("trust proxy", true);
 ====================================================== */
 const allowedOrigins = [
   "http://localhost:5173",
+  "http://localhost:5000",
+  "http://127.0.0.1:5000",
   "http://13.234.235.130:5173",
   "https://d2wmdj5cojtj0q.cloudfront.net",
 ];
@@ -85,7 +88,9 @@ app.use("/api/events", eventRoutes);
 app.use("/api/playback", playbackRoutes);
 app.use("/api/viewers", viewerRoutes);
 app.use("/api/analytics", analyticsRoutes);
-app.use("/api/payments", paymentRoutes); // ← create-session, verify, admin
+app.use("/api/payments", paymentRoutes); 
 app.use("/api/aws", awsRoutes);
+app.use("/api/analyticsReport", analyticsReportRoutes);
+app.use("/api/dashboard", analyticsDashRoutes);
 
 export default app;
