@@ -472,15 +472,12 @@ export default class EventController {
     }
   }
 
-  // =====================================================
-  // DOWNLOAD FULL VOD (MP4) USING PRESIGNED URL
+ // =====================================================
+  // DOWNLOAD ALL VOD RESOLUTIONS (MP4) USING PRESIGNED URL
   // =====================================================
   static async downloadVod(req, res) {
     try {
       const { eventId } = req.params;
-      const resolution = req.params.resolution || "720p"; // now read resolution from path param
-
-      const allowedResolutions = ["1080p", "720p", "480p"];
 
       if (!eventId) {
         return res.status(400).json({
@@ -489,16 +486,9 @@ export default class EventController {
         });
       }
 
-      if (!allowedResolutions.includes(resolution)) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid resolution. Allowed: ${allowedResolutions.join(", ")}`,
-        });
-      }
-
       const prefix = `vod-output/${eventId}/`;
 
-      // 1️⃣ List objects inside event folder
+      // 1️⃣ List all objects under event folder
       const listResponse = await s3Client.send(
         new ListObjectsV2Command({
           Bucket: VOD_BUCKET,
@@ -513,40 +503,45 @@ export default class EventController {
         });
       }
 
-      // 2️⃣ Find MP4 matching requested resolution
-      const mp4Object = listResponse.Contents.find(
-        (obj) =>
-          obj.Key &&
-          obj.Key.toLowerCase().endsWith(`_full_${resolution}.mp4`)
-      );
+      const allowedResolutions = ["1080p", "720p", "480p"];
+      const presignedUrls = {};
 
-      if (!mp4Object) {
+      // 2️⃣ Loop through each resolution
+      for (const resolution of allowedResolutions) {
+        const mp4Object = listResponse.Contents.find(
+          (obj) =>
+            obj.Key &&
+            obj.Key.toLowerCase().endsWith(`_full_${resolution}.mp4`)
+        );
+
+        if (mp4Object) {
+          const getObjectCommand = new GetObjectCommand({
+            Bucket: VOD_BUCKET,
+            Key: mp4Object.Key,
+            ResponseContentDisposition: `attachment; filename="${mp4Object.Key.split("/").pop()}"`,
+          });
+
+          const signedUrl = await getSignedUrl(s3Client, getObjectCommand, {
+            expiresIn: 60 * 60, // 1 hour
+          });
+
+          presignedUrls[resolution] = signedUrl;
+        }
+      }
+
+      if (Object.keys(presignedUrls).length === 0) {
         return res.status(404).json({
           success: false,
-          message: `MP4 video not found for resolution ${resolution}`,
+          message: "No MP4 files found for this event",
         });
       }
 
-      // 3️⃣ Generate presigned URL
-      const getObjectCommand = new GetObjectCommand({
-        Bucket: VOD_BUCKET,
-        Key: mp4Object.Key,
-        ResponseContentDisposition: `attachment; filename="${mp4Object.Key.split("/").pop()}"`,
-      });
-
-      const signedUrl = await getSignedUrl(s3Client, getObjectCommand, {
-        expiresIn: 60 * 60, // 1 hour
-      });
-
       return res.status(200).json({
         success: true,
-        message: "Presigned download URL generated successfully",
+        message: "Presigned URLs generated successfully",
         data: {
           eventId,
-          resolution,
-          bucket: VOD_BUCKET,
-          key: mp4Object.Key,
-          downloadUrl: signedUrl,
+          resolutions: presignedUrls,
         },
       });
 
@@ -555,11 +550,12 @@ export default class EventController {
 
       return res.status(500).json({
         success: false,
-        message: "Failed to generate download URL",
+        message: "Failed to generate download URLs",
         error: error.message,
       });
     }
   }
+
 
 
   // =====================================================
