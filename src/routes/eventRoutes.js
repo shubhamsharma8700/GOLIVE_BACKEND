@@ -228,7 +228,7 @@ router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
  *       200:
  *         description: Presigned download URL returned
  */
-router.get("/vod/download/:eventId/:resolution", EventController.downloadVod);
+router.get("/vod/download/:eventId", EventController.downloadVod);
 
 /* ============================================================
    2. CREATE EVENT
