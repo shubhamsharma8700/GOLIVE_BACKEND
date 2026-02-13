@@ -261,6 +261,7 @@ export const getDashboardAnalytics = async (req, res) => {
     console.error("Dashboard analytics error:", error);
     return res.status(500).json({
       message: "Internal Server Error",
+      error: error || "An error occurred while fetching dashboard analytics",
     });
   }
 };
