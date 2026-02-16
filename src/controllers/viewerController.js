@@ -190,14 +190,27 @@ export async function listViewersByEvent(req, res, next) {
 ======================================================= */
 export async function getViewerById(req, res, next) {
   try {
-    const { clientViewerId } = req.params;
+    // console.log("Received request to get viewer with ID:", req.params);
+
+    const { viewerID } = req.params; // FIXED (match exact case)
+    const clientViewerId = viewerID;
+
+    // console.log("Fetching viewer with clientViewerId:", clientViewerId);
+
+    if (!clientViewerId || clientViewerId.trim() === "") {
+      return res.status(400).json({
+        error: "clientViewerId is required",
+      });
+    }
 
     const result = await ddbDocClient.send(
       new QueryCommand({
         TableName: VIEWERS_TABLE,
         IndexName: VIEWER_ID_INDEX,
         KeyConditionExpression: "clientViewerId = :v",
-        ExpressionAttributeValues: { ":v": clientViewerId },
+        ExpressionAttributeValues: {
+          ":v": clientViewerId,
+        },
         ScanIndexForward: false,
       })
     );
@@ -206,11 +219,8 @@ export async function getViewerById(req, res, next) {
       return res.status(404).json({ error: "Viewer not found" });
     }
 
-    const viewers = result.Items;
-
-    /* ---------- FETCH EVENT PER VIEWER ---------- */
     const enriched = await Promise.all(
-      viewers.map(async (v) => {
+      result.Items.map(async (v) => {
         const eventRes = await ddbDocClient.send(
           new GetCommand({
             TableName: EVENTS_TABLE,
@@ -230,6 +240,8 @@ export async function getViewerById(req, res, next) {
     next(err);
   }
 }
+
+
 
 /* =======================================================
    4. DELETE VIEWER

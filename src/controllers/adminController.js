@@ -405,8 +405,12 @@ export async function requestPasswordReset(req, res, next) {
       })
     );
 
-    if (!q.Items?.length)
-      return res.json({ message: "If email exists, OTP sent" });
+    // If email not found → proper error response
+    if (!q.Items?.length) {
+      return res.status(404).json({
+        error: "Email not found. Please check the email address.",
+      });
+    }
 
     const admin = q.Items[0];
     const now = Date.now();

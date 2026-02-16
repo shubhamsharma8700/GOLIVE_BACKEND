@@ -214,7 +214,7 @@ router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
    ============================================================ */
 /**
  * @swagger
- * /api/events/vod/download/{eventId}:
+ * /api/events/vod/download/{eventId}/{resolution}:
  *   get:
  *     summary: Generate presigned download URL for full VOD MP4
  *     tags: [Events]

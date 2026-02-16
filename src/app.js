@@ -7,8 +7,11 @@ import playbackRoutes from "./routes/playbackRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
+import analyticsDashRoutes from "./routes/DashboardRoutes.js";
+import eventRoutes from "./routes/eventRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
-import PaymentsController from "./controllers/paymentsController.js";
+import playbackRoutes from "./routes/playbackRoutes.js";
+import analyticsReportRoutes from "./routes/ReportRoutes.js";
 import viewerRoutes from "./routes/viewerRoutes.js";
 
 
