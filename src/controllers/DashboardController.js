@@ -2,6 +2,7 @@ import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ANALYTICS_TABLE, ddbDocClient } from "../config/awsClients.js";
 
 const ANALYTICS_TABLE_NAME = ANALYTICS_TABLE;
+const EVENTS_TABLE_NAME = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 const ADMINS_TABLE = process.env.ADMIN_TABLE_NAME;
 const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE;
 
@@ -60,6 +61,18 @@ export const getDashboardAnalytics = async (req, res) => {
     const previousYear = String(Number(currentYear) - 1);
 
     // =====================================================
+    // EVENTS TABLE - Get Total Events Count
+    // =====================================================
+    const eventsResult = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: EVENTS_TABLE_NAME,
+      })
+    );
+
+    const events = eventsResult.Items || [];
+    const totalEvents = events.length;
+
+    // =====================================================
     // ANALYTICS TABLE (MATCHES YOUR WORKING API LOGIC)
     // =====================================================
     const analyticsResult = await ddbDocClient.send(
@@ -73,7 +86,6 @@ export const getDashboardAnalytics = async (req, res) => {
     const uniqueEventsSet = new Set();
 
     let totalViews = Items.length; // EXACT match to totalSessions
-    let totalEvents = 0;
 
     const weeklyMap = {
       Mon: new Set(),
@@ -125,8 +137,6 @@ export const getDashboardAnalytics = async (req, res) => {
         }
       }
     });
-
-    totalEvents = uniqueEventsSet.size;
 
     // =====================================================
     // ADMINS TABLE
