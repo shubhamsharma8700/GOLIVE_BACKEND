@@ -1,5 +1,5 @@
 import express from "express";
-import { getAnalyticsByEventId } from "../controllers/ReportController.js";
+import { getFullDashboardData } from "../controllers/ReportController.js";
 
 const router = express.Router();
 
@@ -31,6 +31,6 @@ const router = express.Router();
  *         description: Analytics report returned
  */
 // Handles both cases automatically
-router.post("/", getAnalyticsByEventId);
+router.post("/", getFullDashboardData);
 
 export default router;
