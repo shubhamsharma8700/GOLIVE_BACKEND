@@ -9,7 +9,12 @@ import {
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_PUBLISHABLE_KEY =
+  process.env.STRIPE_PUBLISHABLE_KEY || process.env.PUBLISHABLE_KEY || null;
+
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+let stripeAccountIdCache = null;
 
 const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE || "go-live-payments";
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
@@ -21,6 +26,34 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const nowISO = () => new Date().toISOString();
 
 const STRIPE_SUCCESS_PAYMENT_STATUSES = new Set(["paid", "succeeded"]);
+
+function getStripeConfigError() {
+  if (!STRIPE_SECRET_KEY) {
+    return "Missing STRIPE_SECRET_KEY in backend environment";
+  }
+
+  if (!STRIPE_SECRET_KEY.startsWith("sk_")) {
+    return "Invalid STRIPE_SECRET_KEY format";
+  }
+
+  if (STRIPE_PUBLISHABLE_KEY && !STRIPE_PUBLISHABLE_KEY.startsWith("pk_")) {
+    return "Invalid STRIPE_PUBLISHABLE_KEY format";
+  }
+
+  return null;
+}
+
+async function getStripeAccountIdSafe() {
+  if (stripeAccountIdCache || !stripe) return stripeAccountIdCache;
+  try {
+    const account = await stripe.accounts.retrieve();
+    stripeAccountIdCache = account?.id || null;
+    return stripeAccountIdCache;
+  } catch (err) {
+    console.error("Failed to fetch Stripe account id:", err.message);
+    return null;
+  }
+}
 
 function sanitizeCurrency(currency) {
   return String(currency || "USD").toUpperCase();
@@ -129,6 +162,14 @@ async function getStripeIntentDetails(paymentIntentId) {
 export default class PaymentsController {
   static async createSession(req, res) {
     try {
+      const stripeConfigError = getStripeConfigError();
+      if (stripeConfigError || !stripe) {
+        return res.status(500).json({
+          success: false,
+          message: stripeConfigError || "Stripe is not configured",
+        });
+      }
+
       const { eventId } = req.params;
       const viewer = req.viewer;
 
@@ -299,6 +340,7 @@ export default class PaymentsController {
         status: "pending",
         sessionId: session.id,
         url: session.url,
+        stripeAccountId: await getStripeAccountIdSafe(),
       });
     } catch (err) {
       console.error("createSession error:", err);
@@ -310,6 +352,14 @@ export default class PaymentsController {
   }
 
   static async webhook(req, res) {
+    const stripeConfigError = getStripeConfigError();
+    if (stripeConfigError || !stripe) {
+      return res.status(500).json({
+        success: false,
+        message: stripeConfigError || "Stripe is not configured",
+      });
+    }
+
     let stripeEvent;
 
     try {
