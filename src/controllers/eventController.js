@@ -3,6 +3,7 @@ import {
   DeleteCommand,
   GetCommand,
   PutCommand,
+  QueryCommand,
   ScanCommand,
   UpdateCommand
 } from "../config/awsClients.js";
@@ -45,6 +46,11 @@ import { v4 as uuidv4 } from "uuid";
 ====================================================== */
 
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
+const VIEWERS_TABLE =
+  process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
+const ANALYTICS_TABLE =
+  process.env.ANALYTICS_TABLE || "go-live-analytics";
+const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE || "go-live-payments";
 const VOD_BUCKET = process.env.S3_VOD_BUCKET || "go-live-vod";
 const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 900);
 
@@ -274,6 +280,145 @@ async function cleanupCloudFront(distributionId, cacheBehaviorIds, originId) {
   );
 }
 
+async function scanByEventId(tableName, eventId) {
+  const results = [];
+  let lastEvaluatedKey;
+
+  do {
+    const output = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        FilterExpression: "eventId = :eid",
+        ExpressionAttributeValues: {
+          ":eid": eventId,
+        },
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    if (output.Items?.length) {
+      results.push(...output.Items);
+    }
+
+    lastEvaluatedKey = output.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return results;
+}
+
+async function queryAllByEventId(tableName, eventId, indexName) {
+  const items = [];
+  let lastEvaluatedKey;
+
+  do {
+    const output = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: tableName,
+        IndexName: indexName,
+        KeyConditionExpression: "eventId = :eid",
+        ExpressionAttributeValues: {
+          ":eid": eventId,
+        },
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    if (output.Items?.length) {
+      items.push(...output.Items);
+    }
+
+    lastEvaluatedKey = output.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return items;
+}
+
+async function deleteItemsByKeys(tableName, items, buildKey) {
+  let deleted = 0;
+
+  for (const item of items) {
+    const key = buildKey(item);
+    if (!key) continue;
+
+    await ddbDocClient.send(
+      new DeleteCommand({
+        TableName: tableName,
+        Key: key,
+      })
+    );
+    deleted += 1;
+  }
+
+  return deleted;
+}
+
+async function deleteRelatedDbRecordsForEvent(eventId) {
+  let deletedViewers = 0;
+  let deletedAnalytics = 0;
+  let deletedPayments = 0;
+
+  const viewers = await queryAllByEventId(VIEWERS_TABLE, eventId);
+  deletedViewers = await deleteItemsByKeys(
+    VIEWERS_TABLE,
+    viewers,
+    (item) =>
+      item?.eventId && item?.clientViewerId
+        ? { eventId: item.eventId, clientViewerId: item.clientViewerId }
+        : null
+  );
+
+  let analyticsItems;
+  try {
+    analyticsItems = await queryAllByEventId(
+      ANALYTICS_TABLE,
+      eventId,
+      "eventId-index"
+    );
+  } catch (err) {
+    console.warn(
+      `Analytics eventId-index unavailable, using scan fallback for event ${eventId}:`,
+      err.message
+    );
+    analyticsItems = await scanByEventId(ANALYTICS_TABLE, eventId);
+  }
+
+  deletedAnalytics = await deleteItemsByKeys(
+    ANALYTICS_TABLE,
+    analyticsItems,
+    (item) => (item?.sessionId ? { sessionId: item.sessionId } : null)
+  );
+
+  let paymentItems;
+  try {
+    paymentItems = await queryAllByEventId(
+      PAYMENTS_TABLE,
+      eventId,
+      "eventId-index"
+    );
+  } catch (err) {
+    console.warn(
+      `Payments eventId-index unavailable, using scan fallback for event ${eventId}:`,
+      err.message
+    );
+    paymentItems = await scanByEventId(PAYMENTS_TABLE, eventId);
+  }
+
+  deletedPayments = await deleteItemsByKeys(
+    PAYMENTS_TABLE,
+    paymentItems,
+    (item) =>
+      item?.paymentId && item?.createdAt
+        ? { paymentId: item.paymentId, createdAt: item.createdAt }
+        : null
+  );
+
+  return {
+    deletedViewers,
+    deletedAnalytics,
+    deletedPayments,
+  };
+}
+
 
 async function performAsyncDeletion(eventId, event) {
   try {
@@ -394,6 +539,13 @@ async function performAsyncDeletion(eventId, event) {
         await deleteS3Prefix(VOD_BUCKET, event.vodOutputPath);
       }
     }
+
+    const cascadeDeletionSummary =
+      await deleteRelatedDbRecordsForEvent(eventId);
+    console.log(
+      `Deleted related DB records for event ${eventId}:`,
+      cascadeDeletionSummary
+    );
 
     /* ================= DELETE DB RECORD ================= */
     await ddbDocClient.send(
@@ -784,6 +936,12 @@ export default class EventController {
       if (type && EVENT_TYPES.has(type)) {
         events = events.filter((e) => e.eventType === type);
       }
+
+      events.sort((a, b) => {
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
 
       return res.status(200).json({
         success: true,

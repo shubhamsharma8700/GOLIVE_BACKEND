@@ -4,76 +4,147 @@ import { ANALYTICS_TABLE, ddbDocClient } from "../config/awsClients.js";
 const ANALYTICS_TABLE_NAME = ANALYTICS_TABLE;
 const ADMINS_TABLE = process.env.ADMIN_TABLE_NAME;
 const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE;
+const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME;
 
-const TIME_ZONE = "Australia/Sydney";
+const WEEK_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
-// ================= FORMATTERS =================
-const formatMonthKey = (date) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-  }).format(date);
+const toNumber = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
 
-const formatMonthShort = (date) =>
-  new Intl.DateTimeFormat("en-AU", {
-    timeZone: TIME_ZONE,
-    month: "short",
-  }).format(date);
+const formatNumber = (num) => {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
+  if (num >= 1000) return Math.round(num / 1000) + "K";
+  return String(num);
+};
 
-const formatWeekday = (date) =>
-  new Intl.DateTimeFormat("en-AU", {
-    timeZone: TIME_ZONE,
-    weekday: "short",
-  }).format(date);
+const formatCurrency = (num) => "$" + toNumber(num).toLocaleString();
 
-// ================= UTIL =================
+const percentageDelta = (currentValue, previousValue) => {
+  if (!previousValue) return currentValue > 0 ? "+100%" : "+0%";
+  const delta = ((currentValue - previousValue) / previousValue) * 100;
+  const sign = delta >= 0 ? "+" : "";
+  return `${sign}${delta.toFixed(0)}%`;
+};
+
 const positivePercentage = (newCount, totalCount) => {
   if (!totalCount || newCount <= 0) return "+0%";
   const percent = (newCount / totalCount) * 100;
   return `+${percent.toFixed(0)}%`;
 };
 
-const formatNumber = (num) => {
-  if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
-  if (num >= 1000) return Math.round(num / 1000) + "K";
-  return num.toString();
+const formatDurationShort = (seconds) => {
+  const safeSeconds = Math.max(0, toNumber(seconds));
+  const totalMinutes = Math.round(safeSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes} min`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (minutes === 0) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
 };
 
-const formatCurrency = (num) => "$" + num.toLocaleString();
+const safeDate = (value) => {
+  if (!value) return null;
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt;
+};
 
-// ================= CONTROLLER =================
-export const getDashboardAnalytics = async (req, res) => {
-  try {
-    const now = new Date();
-    const currentMonthKey = formatMonthKey(now);
-    const currentYear = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TIME_ZONE,
-      year: "numeric",
-    }).format(now);
+const monthKey = (date) => {
+  const d = safeDate(date);
+  if (!d) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
 
-    const previousMonthDate = new Date(now);
-    previousMonthDate.setMonth(now.getMonth() - 1);
-    const previousMonthKey = formatMonthKey(previousMonthDate);
-    
-    // Previous year (for YTD comparison)
-    const previousYear = String(Number(currentYear) - 1);
+const weekDayKey = (date) => {
+  const d = safeDate(date);
+  if (!d) return null;
+  const jsDay = d.getDay();
+  const map = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return map[jsDay];
+};
 
-    // =====================================================
-    // ANALYTICS TABLE (MATCHES YOUR WORKING API LOGIC)
-    // =====================================================
-    const analyticsResult = await ddbDocClient.send(
+const getCurrentWeekRange = () => {
+  const now = new Date();
+  const start = new Date(now);
+  const day = start.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  start.setDate(start.getDate() + diffToMonday);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return { start, end };
+};
+
+const scanAllItems = async (tableName) => {
+  if (!tableName) return [];
+
+  const allItems = [];
+  let lastEvaluatedKey;
+
+  do {
+    const result = await ddbDocClient.send(
       new ScanCommand({
-        TableName: ANALYTICS_TABLE_NAME,
+        TableName: tableName,
+        ExclusiveStartKey: lastEvaluatedKey,
       })
     );
 
-    const Items = analyticsResult.Items || [];
+    if (result.Items?.length) {
+      allItems.push(...result.Items);
+    }
 
-    const uniqueEventsSet = new Set();
+    lastEvaluatedKey = result.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
 
-    let totalViews = Items.length; // EXACT match to totalSessions
-    let totalEvents = 0;
+  return allItems;
+};
+
+export const getDashboardAnalytics = async (req, res) => {
+  try {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const previousYear = currentYear - 1;
+
+    const [analyticsItems, events, admins, payments] = await Promise.all([
+      scanAllItems(ANALYTICS_TABLE_NAME),
+      scanAllItems(EVENTS_TABLE),
+      scanAllItems(ADMINS_TABLE),
+      scanAllItems(PAYMENTS_TABLE),
+    ]);
+
+    const totalViews = analyticsItems.length;
+    const totalEvents = events.length;
+
+    const eventMap = new Map();
+    events.forEach((event) => {
+      eventMap.set(event.eventId, {
+        event,
+        totalViews: 0,
+        totalWatchTime: 0,
+        uniqueViewers: new Set(),
+        hourlySessions: new Map(),
+        latestSeenAt: null,
+      });
+    });
 
     const weeklyMap = {
       Mon: new Set(),
@@ -86,118 +157,107 @@ export const getDashboardAnalytics = async (req, res) => {
     };
 
     const monthlyEngagementMap = {};
-
-    for (let i = 0; i < 12; i++) {
-      const d = new Date(`${currentYear}-01-01`);
-      d.setMonth(i);
-      monthlyEngagementMap[formatMonthKey(d)] = 0;
+    for (let i = 0; i < 12; i += 1) {
+      monthlyEngagementMap[`${currentYear}-${String(i + 1).padStart(2, "0")}`] = 0;
     }
 
-    const startOfWeek = new Date(now);
-    const day = startOfWeek.getDay();
-    const diffToMonday = day === 0 ? -6 : 1 - day;
-    startOfWeek.setDate(startOfWeek.getDate() + diffToMonday);
-    startOfWeek.setHours(0, 0, 0, 0);
+    const { start: weekStart, end: weekEnd } = getCurrentWeekRange();
 
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 7);
+    analyticsItems.forEach((item) => {
+      const eventId = item.eventId;
+      const clientViewerId = item.clientViewerId;
+      const duration = Math.max(0, toNumber(item.duration));
 
-    Items.forEach((item) => {
-      if (item.eventId) {
-        uniqueEventsSet.add(item.eventId);
-      }
+      const itemDate = safeDate(item.startTime || item.createdAt);
 
-      if (item.startTime) {
-        const date = new Date(item.startTime);
+      if (itemDate) {
+        const mKey = monthKey(itemDate);
+        if (mKey && Object.prototype.hasOwnProperty.call(monthlyEngagementMap, mKey)) {
+          monthlyEngagementMap[mKey] += 1;
+        }
 
-        // Weekly
-        if (date >= startOfWeek && date < endOfWeek && item.eventId) {
-          const weekday = formatWeekday(date);
-          if (weeklyMap[weekday]) {
-            weeklyMap[weekday].add(item.eventId);
+        if (itemDate >= weekStart && itemDate < weekEnd && eventId) {
+          const dKey = weekDayKey(itemDate);
+          if (dKey && weeklyMap[dKey]) {
+            weeklyMap[dKey].add(eventId);
           }
         }
+      }
 
-        // Yearly month engagement
-        const monthKey = formatMonthKey(date);
-        if (monthlyEngagementMap.hasOwnProperty(monthKey)) {
-          monthlyEngagementMap[monthKey]++;
+      if (!eventId) return;
+
+      if (!eventMap.has(eventId)) {
+        eventMap.set(eventId, {
+          event: {
+            eventId,
+            title: "Untitled",
+            startTime: null,
+            endTime: null,
+            status: "unknown",
+            eventType: "unknown",
+          },
+          totalViews: 0,
+          totalWatchTime: 0,
+          uniqueViewers: new Set(),
+          hourlySessions: new Map(),
+          latestSeenAt: null,
+        });
+      }
+
+      const row = eventMap.get(eventId);
+      row.totalViews += 1;
+      row.totalWatchTime += duration;
+
+      if (clientViewerId) {
+        row.uniqueViewers.add(clientViewerId);
+      }
+
+      if (itemDate) {
+        const hourKey = itemDate.toISOString().slice(0, 13);
+        row.hourlySessions.set(hourKey, (row.hourlySessions.get(hourKey) || 0) + 1);
+
+        if (!row.latestSeenAt || itemDate > row.latestSeenAt) {
+          row.latestSeenAt = itemDate;
         }
       }
     });
 
-    totalEvents = uniqueEventsSet.size;
-
-    // =====================================================
-    // ADMINS TABLE
-    // =====================================================
-    const adminResult = await ddbDocClient.send(
-      new ScanCommand({ TableName: ADMINS_TABLE })
-    );
-
-    const admins = adminResult.Items || [];
+    const currentMonthKey = `${currentYear}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const totalAdmins = admins.length;
+    const newAdminsThisMonth = admins.reduce((count, admin) => {
+      const key = monthKey(admin.createdAt);
+      return key === currentMonthKey ? count + 1 : count;
+    }, 0);
 
-    let newAdminsThisMonth = 0;
-
-    admins.forEach((admin) => {
-      if (!admin.createdAt) return;
-      const date = new Date(admin.createdAt);
-      if (formatMonthKey(date) === currentMonthKey) {
-        newAdminsThisMonth++;
-      }
-    });
-
-    // =====================================================
-    // PAYMENTS TABLE (SUCCEEDED ONLY) - YEAR-TO-DATE
-    // =====================================================
-    const paymentsResult = await ddbDocClient.send(
-      new ScanCommand({ TableName: PAYMENTS_TABLE })
-    );
-
-    const payments = paymentsResult.Items || [];
-
-    let ytdRevenue = 0;                    // Current year Jan to current month
-    let previousYtdRevenue = 0;            // Previous year same period (Jan to current month)
-
-    const currentMonthNum = now.getMonth(); // 0-11
+    let ytdRevenue = 0;
+    let previousYtdRevenue = 0;
+    const currentMonthNum = now.getMonth() + 1;
 
     payments.forEach((payment) => {
-      // Only count succeeded/completed payments
       if (payment.status !== "succeeded") return;
-      if (!payment.amount || !payment.createdAt) return;
+      const amount = toNumber(payment.amount);
+      if (!amount) return;
 
-      const paymentDate = new Date(payment.createdAt);
-      const paymentYear = new Intl.DateTimeFormat("en-CA", {
-        timeZone: TIME_ZONE,
-        year: "numeric",
-      }).format(paymentDate);
-      const paymentMonthNum = new Intl.DateTimeFormat("en-CA", {
-        timeZone: TIME_ZONE,
-        month: "2-digit",
-      }).format(paymentDate);
+      const pDate = safeDate(payment.createdAt || payment.updatedAt);
+      if (!pDate) return;
 
-      const amount = Number(payment.amount);
+      const year = pDate.getFullYear();
+      const month = pDate.getMonth() + 1;
 
-      // Current year YTD: same year, month <= current month
-      if (paymentYear === currentYear && parseInt(paymentMonthNum) <= currentMonthNum + 1) {
+      if (year === currentYear && month <= currentMonthNum) {
         ytdRevenue += amount;
       }
 
-      // Previous year YTD: same period last year
-      if (paymentYear === previousYear && parseInt(paymentMonthNum) <= currentMonthNum + 1) {
+      if (year === previousYear && month <= currentMonthNum) {
         previousYtdRevenue += amount;
       }
     });
 
-    // =====================================================
-    // CARDS (YTD - YEAR-TO-DATE WITH YoY COMPARISON)
-    // =====================================================
     const dashboardCards = [
       {
         title: "Total Events",
         value: formatNumber(totalEvents),
-        change: "+0%", // Events not based on createdAt
+        change: "+0%",
         icon: "Calendar",
         color: "#B89B5E",
       },
@@ -211,7 +271,7 @@ export const getDashboardAnalytics = async (req, res) => {
       {
         title: "Total Revenue",
         value: formatCurrency(ytdRevenue),
-        change: positivePercentage(ytdRevenue, previousYtdRevenue),
+        change: percentageDelta(ytdRevenue, previousYtdRevenue),
         icon: "UserPlus",
         color: "#3B82F6",
       },
@@ -224,44 +284,92 @@ export const getDashboardAnalytics = async (req, res) => {
       },
     ];
 
-    // =====================================================
-    // CHART DATA
-    // =====================================================
-    const weekDays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-    const eventData = weekDays.map((d) => ({
+    const eventData = WEEK_DAYS.map((d) => ({
       name: d,
       events: weeklyMap[d].size,
     }));
 
-    const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-
-    const engagementData = monthNames.map((name, index) => {
-      const d = new Date(`${currentYear}-01-01`);
-      d.setMonth(index);
-      const key = formatMonthKey(d);
+    const engagementData = MONTH_NAMES.map((name, idx) => {
+      const key = `${currentYear}-${String(idx + 1).padStart(2, "0")}`;
       return {
         name,
         viewers: monthlyEngagementMap[key] || 0,
       };
     });
 
-    // =====================================================
-    // RESPONSE
-    // =====================================================
+    const previousGoLiveEvents = Array.from(eventMap.values())
+      .map((row) => {
+        const event = row.event || {};
+        const peakViewers = Array.from(row.hourlySessions.values()).reduce(
+          (max, current) => Math.max(max, current),
+          0
+        );
+
+        const avgWatchTimeSeconds =
+          row.totalViews > 0 ? row.totalWatchTime / row.totalViews : 0;
+
+        return {
+          eventId: event.eventId,
+          title: event.title || "Untitled",
+          startTime: event.startTime || null,
+          endTime: event.endTime || null,
+          status: event.status || event.vodStatus || "unknown",
+          eventType: event.eventType || "unknown",
+          thumbnailUrl:
+            event.thumbnailUrl ||
+            "https://images.unsplash.com/photo-1540575467063-178a50c2df87?w=100&q=80",
+          totalViewers: row.uniqueViewers.size,
+          totalSessions: row.totalViews,
+          peakViewers,
+          avgWatchTime: formatDurationShort(avgWatchTimeSeconds),
+          avgWatchTimeSeconds: Math.round(avgWatchTimeSeconds),
+          totalWatchTimeSeconds: Math.round(row.totalWatchTime),
+          lastActivityAt: row.latestSeenAt ? row.latestSeenAt.toISOString() : null,
+        };
+      })
+      .filter((event) => {
+        const start = safeDate(event.startTime);
+        if (!start) return true;
+        return start <= now;
+      })
+      .sort((a, b) => {
+        const aTs = safeDate(a.startTime)?.getTime() || 0;
+        const bTs = safeDate(b.startTime)?.getTime() || 0;
+        return bTs - aTs;
+      });
+
     return res.status(200).json({
-      year: currentYear,
-      timezone: TIME_ZONE,
+      year: String(currentYear),
       cards: dashboardCards,
       eventData,
       engagementData,
+      previousGoLiveEvents,
+      events: previousGoLiveEvents.map((event) => ({
+        eventId: event.eventId,
+        title: event.title,
+        startTime: event.startTime,
+        endTime: event.endTime,
+        eventType: event.eventType,
+        status: event.status,
+        thumbnailUrl: event.thumbnailUrl,
+        totalViewers: event.totalViewers,
+        peakViewers: event.peakViewers,
+        avgWatchTime: event.avgWatchTime,
+      })),
+      summary: {
+        totalEvents,
+        totalViews,
+        totalAdmins,
+        ytdRevenue,
+        previousYtdRevenue,
+      },
     });
-
   } catch (error) {
     console.error("Dashboard analytics error:", error);
     return res.status(500).json({
+      success: false,
       message: "Internal Server Error",
-      error: error || "An error occurred while fetching dashboard analytics",
+      error: error?.message || "An error occurred while fetching dashboard analytics",
     });
   }
 };

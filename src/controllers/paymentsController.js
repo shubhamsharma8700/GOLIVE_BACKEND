@@ -9,36 +9,124 @@ import {
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
 
-/* =========================================================
-   STRIPE
-========================================================= */
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-/* =========================================================
-   TABLES
-========================================================= */
-const PAYMENTS_TABLE =
-  process.env.PAYMENTS_TABLE || "go-live-payments";
-
-const EVENTS_TABLE =
-  process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
-
+const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE || "go-live-payments";
+const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
 const VIEWERS_TABLE =
   process.env.VIEWERS_TABLE_NAME || "go-live-poc-viewers";
 
-const FRONTEND_URL =
-  process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const nowISO = () => new Date().toISOString();
 
-/* =========================================================
-   PAYMENTS CONTROLLER
-========================================================= */
-export default class PaymentsController {
+const STRIPE_SUCCESS_PAYMENT_STATUSES = new Set(["paid", "succeeded"]);
 
-  /* ======================================================
-     1️⃣ CREATE STRIPE CHECKOUT SESSION (VIEWER)
-     ====================================================== */
+function sanitizeCurrency(currency) {
+  return String(currency || "USD").toUpperCase();
+}
+
+function toMinorUnits(amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.round(value * 100);
+}
+
+function mapCheckoutEventToStatus(stripeEventType, paymentStatus) {
+  const normalizedPaymentStatus = String(paymentStatus || "").toLowerCase();
+
+  if (
+    stripeEventType === "checkout.session.async_payment_failed" ||
+    stripeEventType === "checkout.session.expired"
+  ) {
+    return stripeEventType === "checkout.session.expired"
+      ? "canceled"
+      : "failed";
+  }
+
+  if (
+    stripeEventType === "checkout.session.completed" ||
+    stripeEventType === "checkout.session.async_payment_succeeded"
+  ) {
+    if (STRIPE_SUCCESS_PAYMENT_STATUSES.has(normalizedPaymentStatus)) {
+      return "succeeded";
+    }
+    return "pending";
+  }
+
+  return "pending";
+}
+
+async function updateViewerPaymentState({
+  eventId,
+  clientViewerId,
+  status,
+  paymentId,
+  createdAt,
+  stripeCheckoutSessionId,
+  stripePaymentIntentId,
+}) {
+  if (!eventId || !clientViewerId) return;
+
+  const isPaid = status === "succeeded";
+
+  await ddbDocClient.send(
+    new UpdateCommand({
+      TableName: VIEWERS_TABLE,
+      Key: {
+        eventId,
+        clientViewerId,
+      },
+      UpdateExpression: `
+        SET
+          isPaidViewer = :isPaid,
+          viewerpaid = :isPaid,
+          paymentStatus = :status,
+          lastPaymentId = :pid,
+          lastPaymentCreatedAt = :createdAt,
+          lastStripeCheckoutSessionId = :sessionId,
+          lastStripePaymentIntentId = :intentId,
+          updatedAt = :updatedAt
+      `,
+      ExpressionAttributeValues: {
+        ":isPaid": isPaid,
+        ":status": status,
+        ":pid": paymentId || null,
+        ":createdAt": createdAt || null,
+        ":sessionId": stripeCheckoutSessionId || null,
+        ":intentId": stripePaymentIntentId || null,
+        ":updatedAt": nowISO(),
+      },
+    })
+  );
+}
+
+async function getStripeIntentDetails(paymentIntentId) {
+  if (!paymentIntentId) {
+    return {
+      receiptUrl: null,
+      paymentMethodId: null,
+      paymentMethodType: null,
+      paymentMethodDetails: null,
+    };
+  }
+
+  const intent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+    expand: ["latest_charge"],
+  });
+
+  const latestCharge = intent?.latest_charge || null;
+  const paymentMethodDetails = latestCharge?.payment_method_details || null;
+
+  return {
+    receiptUrl: latestCharge?.receipt_url || null,
+    paymentMethodId: intent?.payment_method || null,
+    paymentMethodType: paymentMethodDetails?.type || null,
+    paymentMethodDetails,
+  };
+}
+
+export default class PaymentsController {
   static async createSession(req, res) {
     try {
       const { eventId } = req.params;
@@ -51,7 +139,6 @@ export default class PaymentsController {
         });
       }
 
-      /* ---------- Fetch Event ---------- */
       const { Item: event } = await ddbDocClient.send(
         new GetCommand({
           TableName: EVENTS_TABLE,
@@ -73,20 +160,50 @@ export default class PaymentsController {
         });
       }
 
-      if (
-        typeof event.paymentAmount !== "number" ||
-        !event.currency
-      ) {
+      if (typeof event.paymentAmount !== "number" || !event.currency) {
         return res.status(400).json({
           success: false,
           message: "Payment configuration missing",
         });
       }
 
-      /* ---------- Create Payment ---------- */
+      const { Item: viewerRecord } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: VIEWERS_TABLE,
+          Key: {
+            eventId,
+            clientViewerId: viewer.clientViewerId,
+          },
+        })
+      );
+
+      if (!viewerRecord) {
+        return res.status(404).json({
+          success: false,
+          message: "Viewer registration not found",
+        });
+      }
+
+      if (viewerRecord.isPaidViewer === true) {
+        return res.status(200).json({
+          success: true,
+          message: "Viewer already paid",
+          paymentStatus: "succeeded",
+          alreadyPaid: true,
+        });
+      }
+
       const paymentId = uuidv4();
       const createdAt = nowISO();
-      const amountInMinorUnits = Math.round(event.paymentAmount * 100);
+      const amountInMinorUnits = toMinorUnits(event.paymentAmount);
+      const currency = sanitizeCurrency(event.currency);
+
+      if (!amountInMinorUnits) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid payment amount configured",
+        });
+      }
 
       const session = await stripe.checkout.sessions.create(
         {
@@ -95,7 +212,7 @@ export default class PaymentsController {
           line_items: [
             {
               price_data: {
-                currency: event.currency,
+                currency,
                 product_data: {
                   name: event.title || "Event Access",
                 },
@@ -110,16 +227,24 @@ export default class PaymentsController {
             clientViewerId: viewer.clientViewerId,
             createdAt,
           },
+          payment_intent_data: {
+            metadata: {
+              paymentId,
+              eventId,
+              clientViewerId: viewer.clientViewerId,
+              createdAt,
+            },
+          },
+          customer_email: viewerRecord.email || undefined,
+          client_reference_id: `${eventId}:${viewer.clientViewerId}`,
           success_url: `${FRONTEND_URL}/player/${eventId}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${FRONTEND_URL}/player/${eventId}?payment=cancel`,
-
         },
         {
           idempotencyKey: paymentId,
         }
       );
 
-      /* ---------- Persist Payment ---------- */
       await ddbDocClient.send(
         new PutCommand({
           TableName: PAYMENTS_TABLE,
@@ -128,23 +253,53 @@ export default class PaymentsController {
             createdAt,
             eventId,
             clientViewerId: viewer.clientViewerId,
-            amount: event.paymentAmount,
-            currency: event.currency,
-            status: "created",
+            amount: Number(event.paymentAmount),
+            amountMinor: amountInMinorUnits,
+            currency,
+            status: "pending",
             stripeCheckoutSessionId: session.id,
-            stripePaymentIntentId: null,
+            stripePaymentIntentId:
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : null,
+            stripeEventType: "checkout.session.created",
+            stripeSessionStatus: session.status || null,
+            stripePaymentStatus: session.payment_status || null,
+            stripeCustomerId:
+              typeof session.customer === "string" ? session.customer : null,
+            stripeCustomerEmail:
+              session.customer_details?.email || viewerRecord.email || null,
+            paymentMethodId: null,
+            paymentMethodType: null,
+            paymentMethodDetails: null,
             receiptUrl: null,
+            failureReason: null,
             updatedAt: createdAt,
           },
         })
       );
 
+      await updateViewerPaymentState({
+        eventId,
+        clientViewerId: viewer.clientViewerId,
+        status: "pending",
+        paymentId,
+        createdAt,
+        stripeCheckoutSessionId: session.id,
+        stripePaymentIntentId:
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : null,
+      });
+
       return res.status(200).json({
         success: true,
+        paymentId,
+        createdAt,
+        status: "pending",
         sessionId: session.id,
         url: session.url,
       });
-
     } catch (err) {
       console.error("createSession error:", err);
       return res.status(500).json({
@@ -154,9 +309,6 @@ export default class PaymentsController {
     }
   }
 
-  /* ======================================================
-     2️⃣ STRIPE WEBHOOK (SERVER ONLY)
-     ====================================================== */
   static async webhook(req, res) {
     let stripeEvent;
 
@@ -164,7 +316,7 @@ export default class PaymentsController {
       const signature = req.headers["stripe-signature"];
 
       stripeEvent = stripe.webhooks.constructEvent(
-        req.body, // RAW BUFFER (because express.raw)
+        req.body,
         signature,
         process.env.STRIPE_WEBHOOK_SECRET
       );
@@ -174,9 +326,13 @@ export default class PaymentsController {
     }
 
     try {
-      if (stripeEvent.type === "checkout.session.completed") {
+      if (
+        stripeEvent.type === "checkout.session.completed" ||
+        stripeEvent.type === "checkout.session.async_payment_succeeded" ||
+        stripeEvent.type === "checkout.session.async_payment_failed" ||
+        stripeEvent.type === "checkout.session.expired"
+      ) {
         const session = stripeEvent.data.object;
-
         const {
           paymentId,
           eventId,
@@ -185,11 +341,9 @@ export default class PaymentsController {
         } = session.metadata || {};
 
         if (!paymentId || !createdAt) {
-          console.warn("Missing payment metadata");
           return res.status(200).json({ received: true });
         }
 
-        // ✅ Correct lookup (PK + SK)
         const paymentRecord = await ddbDocClient.send(
           new GetCommand({
             TableName: PAYMENTS_TABLE,
@@ -201,21 +355,34 @@ export default class PaymentsController {
         );
 
         const payment = paymentRecord.Item;
-
-        if (!payment || payment.status === "succeeded") {
+        if (!payment) {
           return res.status(200).json({ received: true });
         }
 
-        let receiptUrl = null;
-        if (session.payment_intent) {
-          const intent = await stripe.paymentIntents.retrieve(
-            session.payment_intent
-          );
-          receiptUrl =
-            intent?.charges?.data?.[0]?.receipt_url || null;
-        }
+        const mappedStatus = mapCheckoutEventToStatus(
+          stripeEvent.type,
+          session.payment_status
+        );
 
-        // ✅ Update payment
+        const stripePaymentIntentId =
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : null;
+
+        const {
+          receiptUrl,
+          paymentMethodId,
+          paymentMethodType,
+          paymentMethodDetails,
+        } = await getStripeIntentDetails(stripePaymentIntentId);
+
+        const failureReason =
+          mappedStatus === "failed"
+            ? "Stripe checkout payment failed"
+            : mappedStatus === "canceled"
+              ? "Stripe checkout session expired"
+              : null;
+
         await ddbDocClient.send(
           new UpdateCommand({
             TableName: PAYMENTS_TABLE,
@@ -224,51 +391,97 @@ export default class PaymentsController {
               createdAt,
             },
             UpdateExpression:
-              "SET #s = :s, stripePaymentIntentId = :pi, receiptUrl = :r, updatedAt = :u",
+              "SET #s = :s, stripePaymentIntentId = :pi, stripeCheckoutSessionId = :si, stripeEventType = :et, stripeSessionStatus = :ss, stripePaymentStatus = :ps, stripeCustomerId = :cid, stripeCustomerEmail = :cem, paymentMethodId = :pmid, paymentMethodType = :pmt, paymentMethodDetails = :pmd, receiptUrl = :r, failureReason = :fr, updatedAt = :u",
             ExpressionAttributeNames: {
               "#s": "status",
             },
             ExpressionAttributeValues: {
-              ":s": "succeeded",
-              ":pi": session.payment_intent,
+              ":s": mappedStatus,
+              ":pi": stripePaymentIntentId,
+              ":si": session.id || null,
+              ":et": stripeEvent.type,
+              ":ss": session.status || null,
+              ":ps": session.payment_status || null,
+              ":cid":
+                typeof session.customer === "string" ? session.customer : null,
+              ":cem": session.customer_details?.email || null,
+              ":pmid": paymentMethodId,
+              ":pmt": paymentMethodType,
+              ":pmd": paymentMethodDetails,
               ":r": receiptUrl,
+              ":fr": failureReason,
               ":u": nowISO(),
             },
           })
         );
 
-        // ✅ Grant viewer access
+        await updateViewerPaymentState({
+          eventId,
+          clientViewerId,
+          status: mappedStatus,
+          paymentId,
+          createdAt,
+          stripeCheckoutSessionId: session.id || null,
+          stripePaymentIntentId,
+        });
+      }
+
+      if (stripeEvent.type === "payment_intent.payment_failed") {
+        const intent = stripeEvent.data.object;
+        const {
+          paymentId,
+          eventId,
+          clientViewerId,
+          createdAt,
+        } = intent.metadata || {};
+
+        if (!paymentId || !createdAt) {
+          return res.status(200).json({ received: true });
+        }
+
         await ddbDocClient.send(
           new UpdateCommand({
-            TableName: VIEWERS_TABLE,
+            TableName: PAYMENTS_TABLE,
             Key: {
-              eventId,
-              clientViewerId,
+              paymentId,
+              createdAt,
             },
             UpdateExpression:
-              "SET isPaidViewer = :p, paymentStatus = :ps, lastPaymentId = :pid, updatedAt = :u",
+              "SET #s = :s, stripePaymentIntentId = :pi, stripeEventType = :et, stripePaymentStatus = :ps, failureReason = :fr, updatedAt = :u",
+            ExpressionAttributeNames: {
+              "#s": "status",
+            },
             ExpressionAttributeValues: {
-              ":p": true,
-              ":ps": "success",
-              ":pid": paymentId,
+              ":s": "failed",
+              ":pi": intent.id || null,
+              ":et": stripeEvent.type,
+              ":ps": intent.status || "failed",
+              ":fr":
+                intent.last_payment_error?.message ||
+                "Payment failed at Stripe",
               ":u": nowISO(),
             },
           })
         );
+
+        await updateViewerPaymentState({
+          eventId,
+          clientViewerId,
+          status: "failed",
+          paymentId,
+          createdAt,
+          stripeCheckoutSessionId: null,
+          stripePaymentIntentId: intent.id || null,
+        });
       }
 
       return res.status(200).json({ received: true });
-
     } catch (err) {
       console.error("Webhook processing error:", err);
       return res.status(500).json({ error: err.message });
     }
   }
 
-
-  /* ======================================================
-     3️⃣ CHECK PAYMENT STATUS (VIEWER)
-     ====================================================== */
   static async checkStatus(req, res) {
     try {
       const { eventId } = req.params;
@@ -285,8 +498,7 @@ export default class PaymentsController {
         new QueryCommand({
           TableName: PAYMENTS_TABLE,
           IndexName: "eventId-clientViewerId-index",
-          KeyConditionExpression:
-            "eventId = :e AND clientViewerId = :v",
+          KeyConditionExpression: "eventId = :e AND clientViewerId = :v",
           ExpressionAttributeValues: {
             ":e": eventId,
             ":v": viewer.clientViewerId,
@@ -296,11 +508,23 @@ export default class PaymentsController {
         })
       );
 
+      const { Item: viewerRecord } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: VIEWERS_TABLE,
+          Key: {
+            eventId,
+            clientViewerId: viewer.clientViewerId,
+          },
+        })
+      );
+
       return res.status(200).json({
         success: true,
         payment: result.Items?.[0] || null,
+        paymentStatus: viewerRecord?.paymentStatus || "none",
+        isPaidViewer: Boolean(viewerRecord?.isPaidViewer),
+        viewerpaid: Boolean(viewerRecord?.viewerpaid),
       });
-
     } catch (err) {
       console.error("checkStatus error:", err);
       return res.status(500).json({
@@ -310,9 +534,6 @@ export default class PaymentsController {
     }
   }
 
-  /* ======================================================
-     4️⃣ ADMIN — LIST PAYMENTS FOR EVENT
-     ====================================================== */
   static async listForEvent(req, res) {
     try {
       const { eventId } = req.params;
@@ -332,7 +553,6 @@ export default class PaymentsController {
         success: true,
         payments: result.Items || [],
       });
-
     } catch (err) {
       console.error("listForEvent error:", err);
       return res.status(500).json({
@@ -342,35 +562,50 @@ export default class PaymentsController {
     }
   }
 
-  /* ======================================================
-     5️⃣ ADMIN — GET PAYMENT DETAIL
-     ====================================================== */
   static async getPayment(req, res) {
     try {
-      const { paymentId, createdAt } = req.params;
+      const { paymentId } = req.params;
+      const createdAt = req.params.createdAt || req.query.createdAt;
 
-      if (!paymentId || !createdAt) {
+      if (!paymentId) {
         return res.status(400).json({
           success: false,
-          message: "paymentId and createdAt required",
+          message: "paymentId required",
         });
       }
 
-      const record = await ddbDocClient.send(
-        new GetCommand({
-          TableName: PAYMENTS_TABLE,
-          Key: {
-            paymentId,
-            createdAt,
-          },
-        })
-      );
+      let payment = null;
+
+      if (createdAt) {
+        const record = await ddbDocClient.send(
+          new GetCommand({
+            TableName: PAYMENTS_TABLE,
+            Key: {
+              paymentId,
+              createdAt,
+            },
+          })
+        );
+        payment = record.Item || null;
+      } else {
+        const result = await ddbDocClient.send(
+          new QueryCommand({
+            TableName: PAYMENTS_TABLE,
+            KeyConditionExpression: "paymentId = :pid",
+            ExpressionAttributeValues: {
+              ":pid": paymentId,
+            },
+            ScanIndexForward: false,
+            Limit: 1,
+          })
+        );
+        payment = result.Items?.[0] || null;
+      }
 
       return res.status(200).json({
         success: true,
-        payment: record.Item || null,
+        payment,
       });
-
     } catch (err) {
       console.error("getPayment error:", err);
       return res.status(500).json({

@@ -234,6 +234,7 @@ export default class PlaybackController {
 
         accessVerified,
         isPaidViewer: false,
+        viewerpaid: false,
         paymentStatus: "none",
 
         // -------- DEVICE (Frontend – best effort) --------

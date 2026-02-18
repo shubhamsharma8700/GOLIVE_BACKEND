@@ -54,33 +54,162 @@ function formatEvent(e) {
   };
 }
 
+function parseLimit(value, fallback = 10, max = 100) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
+}
+
+function encodePageToken(lastEvaluatedKey) {
+  if (!lastEvaluatedKey) return null;
+  return Buffer.from(JSON.stringify(lastEvaluatedKey)).toString("base64");
+}
+
+function decodePageToken(token) {
+  if (!token) return null;
+  try {
+    const decoded = Buffer.from(token, "base64").toString("utf8");
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
+
+async function getTableCount(tableName) {
+  let total = 0;
+  let lastEvaluatedKey;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        Select: "COUNT",
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    total += result.Count || 0;
+    lastEvaluatedKey = result.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return total;
+}
+
+async function scanAllViewers(tableName) {
+  const allItems = [];
+  let lastEvaluatedKey;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    if (result.Items?.length) {
+      allItems.push(...result.Items);
+    }
+
+    lastEvaluatedKey = result.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return allItems;
+}
+
+async function getEventViewerCount(eventId) {
+  let total = 0;
+  let lastEvaluatedKey;
+
+  do {
+    const result = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: VIEWERS_TABLE,
+        KeyConditionExpression: "eventId = :e",
+        ExpressionAttributeValues: { ":e": eventId },
+        Select: "COUNT",
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    total += result.Count || 0;
+    lastEvaluatedKey = result.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return total;
+}
+
 /* =======================================================
    1. LIST ALL VIEWERS (ADMIN)
    GET /api/viewers
 ======================================================= */
 export async function listViewers(req, res, next) {
   try {
-    const limit = parseInt(req.query.limit || "10", 10);
+    const limit = parseLimit(req.query.limit, 10, 100);
+    const q = String(req.query.q || "")
+      .trim()
+      .toLowerCase();
 
-    const lastKey =
+    const tokenKey = decodePageToken(req.query.nextToken || req.query.lastKey);
+    const legacyKey =
       req.query.lastEventId && req.query.lastClientViewerId
         ? {
-            eventId: req.query.lastEventId,
-            clientViewerId: req.query.lastClientViewerId,
-          }
+          eventId: req.query.lastEventId,
+          clientViewerId: req.query.lastClientViewerId,
+        }
         : null;
 
-    const params = {
-      TableName: VIEWERS_TABLE,
-      Limit: limit,
-    };
+    const exclusiveStartKey = tokenKey || legacyKey;
 
-    if (lastKey) {
-      params.ExclusiveStartKey = lastKey;
+    let viewers = [];
+    let totalItems = 0;
+    let lastEvaluatedKey = null;
+
+    if (q) {
+      const allViewers = await scanAllViewers(VIEWERS_TABLE);
+      const filtered = allViewers.filter((v) => {
+        const fields = [
+          v?.name,
+          v?.email,
+          v?.formData?.name,
+          v?.formData?.email,
+        ];
+        return fields.some((field) =>
+          String(field || "").toLowerCase().includes(q)
+        );
+      });
+
+      totalItems = filtered.length;
+
+      const offset =
+        typeof tokenKey?.offset === "number" && tokenKey.offset >= 0
+          ? tokenKey.offset
+          : 0;
+
+      viewers = filtered.slice(offset, offset + limit);
+
+      if (offset + limit < totalItems) {
+        lastEvaluatedKey = { offset: offset + limit };
+      }
+    } else {
+      const params = {
+        TableName: VIEWERS_TABLE,
+        Limit: limit,
+      };
+
+      if (exclusiveStartKey) {
+        params.ExclusiveStartKey = exclusiveStartKey;
+      }
+
+      const [result, count] = await Promise.all([
+        ddbDocClient.send(new ScanCommand(params)),
+        getTableCount(VIEWERS_TABLE),
+      ]);
+
+      viewers = result.Items || [];
+      totalItems = count;
+      lastEvaluatedKey = result.LastEvaluatedKey || null;
     }
-
-    const result = await ddbDocClient.send(new ScanCommand(params));
-    const viewers = result.Items || [];
 
     /* ---------- FETCH EVENTS PER VIEWER ---------- */
     const eventIds = [...new Set(viewers.map(v => v.eventId))];
@@ -101,19 +230,23 @@ export async function listViewers(req, res, next) {
     );
 
     res.json({
+      totalItems,
+      count: viewers.length,
       items: viewers.map(v => ({
         ...formatViewer(v),
         event: eventMap[v.eventId] || null,
       })),
       pagination: {
         limit,
-        nextKey: result.LastEvaluatedKey
+        totalItems,
+        nextKey: lastEvaluatedKey?.eventId && lastEvaluatedKey?.clientViewerId
           ? {
-              lastEventId: result.LastEvaluatedKey.eventId,
-              lastClientViewerId: result.LastEvaluatedKey.clientViewerId,
-            }
+            lastEventId: lastEvaluatedKey.eventId,
+            lastClientViewerId: lastEvaluatedKey.clientViewerId,
+          }
           : null,
-        hasMore: Boolean(result.LastEvaluatedKey),
+        nextToken: encodePageToken(lastEvaluatedKey),
+        hasMore: Boolean(lastEvaluatedKey),
       },
     });
   } catch (err) {
@@ -127,8 +260,8 @@ export async function listViewers(req, res, next) {
 ======================================================= */
 export async function listViewersByEvent(req, res, next) {
   try {
-    const { eventId } = req.params;
-    const limit = parseInt(req.query.limit || "10", 10);
+    const eventId = req.params.eventId || req.params.eventID;
+    const limit = parseLimit(req.query.limit, 10, 100);
 
     if (!eventId) {
       return res.status(400).json({ error: "eventId is required" });
@@ -156,26 +289,39 @@ export async function listViewersByEvent(req, res, next) {
       ScanIndexForward: false,
     };
 
-    if (req.query.lastClientViewerId) {
+    const tokenKey = decodePageToken(req.query.nextToken || req.query.lastKey);
+    if (tokenKey) {
+      params.ExclusiveStartKey = tokenKey;
+    } else if (req.query.lastClientViewerId) {
       params.ExclusiveStartKey = {
         eventId,
         clientViewerId: req.query.lastClientViewerId,
       };
     }
 
-    const result = await ddbDocClient.send(new QueryCommand(params));
+    const [result, totalItems] = await Promise.all([
+      ddbDocClient.send(new QueryCommand(params)),
+      getEventViewerCount(eventId),
+    ]);
 
     res.json({
       event: eventInfo,
+      totalItems,
+      count: (result.Items || []).length,
       items: (result.Items || []).map(v => ({
         ...formatViewer(v),
         event: eventInfo,
       })),
       pagination: {
         limit,
+        totalItems,
         nextKey: result.LastEvaluatedKey
-          ? result.LastEvaluatedKey.clientViewerId
+          ? {
+            lastEventId: result.LastEvaluatedKey.eventId,
+            lastClientViewerId: result.LastEvaluatedKey.clientViewerId,
+          }
           : null,
+        nextToken: encodePageToken(result.LastEvaluatedKey),
         hasMore: Boolean(result.LastEvaluatedKey),
       },
     });
@@ -249,16 +395,44 @@ export async function getViewerById(req, res, next) {
 ======================================================= */
 export async function deleteViewer(req, res, next) {
   try {
-    const { eventId, clientViewerId } = req.params;
+    const { viewerID } = req.params;
+    const clientViewerId = viewerID;
+
+    if (!clientViewerId) {
+      return res.status(400).json({ error: "viewerID is required" });
+    }
+
+    const lookup = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: VIEWERS_TABLE,
+        IndexName: VIEWER_ID_INDEX,
+        KeyConditionExpression: "clientViewerId = :v",
+        ExpressionAttributeValues: {
+          ":v": clientViewerId,
+        },
+        Limit: 1,
+      })
+    );
+
+    const viewer = lookup.Items?.[0];
+    if (!viewer) {
+      return res.status(404).json({ error: "Viewer not found" });
+    }
 
     await ddbDocClient.send(
       new DeleteCommand({
         TableName: VIEWERS_TABLE,
-        Key: { eventId, clientViewerId },
+        Key: { eventId: viewer.eventId, clientViewerId },
       })
     );
 
-    res.json({ message: "Viewer deleted successfully" });
+    res.json({
+      message: "Viewer deleted successfully",
+      deleted: {
+        eventId: viewer.eventId,
+        clientViewerId,
+      },
+    });
   } catch (err) {
     next(err);
   }

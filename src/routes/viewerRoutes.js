@@ -61,7 +61,7 @@ router.get("/", requireAuth, listViewers);
 
 /**
  * @swagger
- * /api/viewers/event/{eventID}:
+ * /api/viewers/event/{eventId}:
  *   get:
  *     summary: List viewers for a specific event
  *     tags: [Viewers]
@@ -69,7 +69,7 @@ router.get("/", requireAuth, listViewers);
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: eventID
+ *         name: eventId
  *         required: true
  *         schema:
  *           type: string
@@ -85,7 +85,7 @@ router.get("/", requireAuth, listViewers);
  *       200:
  *         description: Viewer list by event
  */
-router.get("/event/:eventID", requireAuth, listViewersByEvent);
+router.get("/event/:eventId", requireAuth, listViewersByEvent);
 
 /**
  * @swagger

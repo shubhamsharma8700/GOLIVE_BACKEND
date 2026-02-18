@@ -108,6 +108,7 @@ router.get(
         clientViewerId: req.viewer.clientViewerId,
         accessVerified: req.viewer.accessVerified,
         isPaidViewer: req.viewer.isPaidViewer,
+        viewerpaid: req.viewer.viewerpaid,
       },
     });
   }

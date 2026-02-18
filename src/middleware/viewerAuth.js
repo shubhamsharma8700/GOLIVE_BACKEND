@@ -64,7 +64,8 @@ export default async function viewerAuth(req, res, next) {
       eventId,
       clientViewerId,
       accessVerified: Item.accessVerified,
-      isPaidViewer: Item.isPaidViewer
+      isPaidViewer: Item.isPaidViewer,
+      viewerpaid: Item.viewerpaid
     };
 
     return next();
