@@ -103,6 +103,19 @@ async function updateViewerPaymentState({
   if (!eventId || !clientViewerId) return;
 
   const isPaid = status === "succeeded";
+  const now = nowISO();
+  const { Item: viewerRecord } = await ddbDocClient.send(
+    new GetCommand({
+      TableName: VIEWERS_TABLE,
+      Key: {
+        eventId,
+        clientViewerId,
+      },
+    })
+  );
+
+  const passwordVerified = viewerRecord?.passwordVerified === true;
+  const registrationComplete = isPaid && passwordVerified;
 
   await ddbDocClient.send(
     new UpdateCommand({
@@ -115,7 +128,10 @@ async function updateViewerPaymentState({
         SET
           isPaidViewer = :isPaid,
           viewerpaid = :isPaid,
+          accessVerified = :accessVerified,
           paymentStatus = :status,
+          registrationComplete = :registrationComplete,
+          registrationCompletedAt = :registrationCompletedAt,
           lastPaymentId = :pid,
           lastPaymentCreatedAt = :createdAt,
           lastStripeCheckoutSessionId = :sessionId,
@@ -124,12 +140,17 @@ async function updateViewerPaymentState({
       `,
       ExpressionAttributeValues: {
         ":isPaid": isPaid,
+        ":accessVerified": isPaid,
         ":status": status,
+        ":registrationComplete": registrationComplete,
+        ":registrationCompletedAt": registrationComplete
+          ? now
+          : viewerRecord?.registrationCompletedAt || null,
         ":pid": paymentId || null,
         ":createdAt": createdAt || null,
         ":sessionId": stripeCheckoutSessionId || null,
         ":intentId": stripePaymentIntentId || null,
-        ":updatedAt": nowISO(),
+        ":updatedAt": now,
       },
     })
   );
@@ -232,6 +253,20 @@ export default class PaymentsController {
           message: "Viewer already paid",
           paymentStatus: "succeeded",
           alreadyPaid: true,
+        });
+      }
+
+      if (!event.accessPassword) {
+        return res.status(400).json({
+          success: false,
+          message: "Event password not configured for paid access flow",
+        });
+      }
+
+      if (viewerRecord.passwordVerified !== true) {
+        return res.status(403).json({
+          success: false,
+          message: "Password verification required before payment",
         });
       }
 
@@ -598,6 +633,8 @@ export default class PaymentsController {
         success: true,
         payment: result.Items?.[0] || null,
         paymentStatus: viewerRecord?.paymentStatus || "none",
+        passwordVerified: Boolean(viewerRecord?.passwordVerified),
+        registrationComplete: Boolean(viewerRecord?.registrationComplete),
         isPaidViewer: Boolean(viewerRecord?.isPaidViewer),
         viewerpaid: Boolean(viewerRecord?.viewerpaid),
       });
