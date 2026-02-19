@@ -444,7 +444,7 @@ export const getAnalyticsByEventId = async (req, res) => {
       0
     );
 
-    const eventRows = Array.from(eventAggMap.values())
+    const allEventRows = Array.from(eventAggMap.values())
       .map((agg) => {
         const event = eventsMap[agg.eventId] || {};
         const avgWatchMinutes =
@@ -482,14 +482,16 @@ export const getAnalyticsByEventId = async (req, res) => {
       })
       .sort((a, b) => b.viewers - a.viewers);
 
+    const eventRows = eventId
+      ? allEventRows.filter((event) => event.eventId === eventId)
+      : allEventRows;
+
     const paidViewers = viewerItems.filter(
       (viewer) => viewer?.isPaidViewer === true || viewer?.viewerpaid === true
     ).length;
 
     const totalViews = analyticsItems.length;
-    const totalEvents = eventId
-      ? Object.keys(eventsMap).length || (eventsMap[eventId] ? 1 : 0)
-      : Object.keys(eventsMap).length;
+    const totalEvents = eventId ? (eventsMap[eventId] ? 1 : 0) : Object.keys(eventsMap).length;
 
     const avgViewers = totalEvents > 0 ? Math.round(totalViews / totalEvents) : 0;
     const avgWatchTimePerSession =
