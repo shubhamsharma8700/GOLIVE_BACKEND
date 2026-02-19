@@ -6,6 +6,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 
 import { ANALYTICS_TABLE, ddbDocClient } from "../config/awsClients.js";
+import { enrichPaymentsWithUsd } from "../utils/currency.js";
 
 const ANALYTICS_TABLE_NAME = ANALYTICS_TABLE;
 const EVENTS_TABLE = process.env.EVENTS_TABLE_NAME || "go-live-poc-events";
@@ -422,6 +423,27 @@ export const getAnalyticsByEventId = async (req, res) => {
       }
     });
 
+    const succeededPayments = paymentItems.filter(
+      (payment) => payment?.status === "succeeded"
+    );
+
+    const succeededPaymentsUsd = await enrichPaymentsWithUsd(succeededPayments);
+
+    const revenueByEventId = new Map();
+    succeededPaymentsUsd.forEach((payment) => {
+      const key = payment?.eventId || null;
+      if (!key) return;
+      revenueByEventId.set(
+        key,
+        toNumber(revenueByEventId.get(key), 0) + toNumber(payment.amountUsd, 0)
+      );
+    });
+
+    const totalRevenue = succeededPaymentsUsd.reduce(
+      (sum, payment) => sum + toNumber(payment?.amountUsd, 0),
+      0
+    );
+
     const eventRows = Array.from(eventAggMap.values())
       .map((agg) => {
         const event = eventsMap[agg.eventId] || {};
@@ -455,18 +477,10 @@ export const getAnalyticsByEventId = async (req, res) => {
           engagement,
           completionRate,
           size: Math.max(80, Math.round(agg.totalViews / 100)),
+          revenueUsd: toNumber(revenueByEventId.get(agg.eventId), 0),
         };
       })
       .sort((a, b) => b.viewers - a.viewers);
-
-    const succeededPayments = paymentItems.filter(
-      (payment) => payment?.status === "succeeded"
-    );
-
-    const totalRevenue = succeededPayments.reduce(
-      (sum, payment) => sum + toNumber(payment?.amount, 0),
-      0
-    );
 
     const paidViewers = viewerItems.filter(
       (viewer) => viewer?.isPaidViewer === true || viewer?.viewerpaid === true
@@ -542,6 +556,7 @@ export const getAnalyticsByEventId = async (req, res) => {
         totalSessions: totalViews,
         paidViewers,
         totalRevenue,
+        totalRevenueCurrency: "USD",
       },
 
       charts: {

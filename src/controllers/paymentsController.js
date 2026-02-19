@@ -8,6 +8,7 @@ import {
 
 import Stripe from "stripe";
 import { v4 as uuidv4 } from "uuid";
+import { convertAmountToUsd } from "../utils/currency.js";
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_PUBLISHABLE_KEY =
@@ -315,6 +316,10 @@ export default class PaymentsController {
             paymentMethodDetails: null,
             receiptUrl: null,
             failureReason: null,
+            amountUsd: null,
+            exchangeRateToUsd: null,
+            exchangeRateDate: null,
+            usdConversionProvider: null,
             updatedAt: createdAt,
           },
         })
@@ -433,6 +438,23 @@ export default class PaymentsController {
               ? "Stripe checkout session expired"
               : null;
 
+        let usdSnapshot = {
+          amountUsd: null,
+          exchangeRateToUsd: null,
+          exchangeRateDate: null,
+          conversionProvider: null,
+        };
+
+        try {
+          usdSnapshot = await convertAmountToUsd({
+            amount: payment.amount,
+            currency: payment.currency,
+            atDate: payment.createdAt || createdAt || nowISO(),
+          });
+        } catch (fxErr) {
+          console.error("USD conversion failed for payment webhook:", fxErr.message);
+        }
+
         await ddbDocClient.send(
           new UpdateCommand({
             TableName: PAYMENTS_TABLE,
@@ -441,7 +463,7 @@ export default class PaymentsController {
               createdAt,
             },
             UpdateExpression:
-              "SET #s = :s, stripePaymentIntentId = :pi, stripeCheckoutSessionId = :si, stripeEventType = :et, stripeSessionStatus = :ss, stripePaymentStatus = :ps, stripeCustomerId = :cid, stripeCustomerEmail = :cem, paymentMethodId = :pmid, paymentMethodType = :pmt, paymentMethodDetails = :pmd, receiptUrl = :r, failureReason = :fr, updatedAt = :u",
+              "SET #s = :s, stripePaymentIntentId = :pi, stripeCheckoutSessionId = :si, stripeEventType = :et, stripeSessionStatus = :ss, stripePaymentStatus = :ps, stripeCustomerId = :cid, stripeCustomerEmail = :cem, paymentMethodId = :pmid, paymentMethodType = :pmt, paymentMethodDetails = :pmd, receiptUrl = :r, failureReason = :fr, amountUsd = :amountUsd, exchangeRateToUsd = :rateUsd, exchangeRateDate = :rateDate, usdConversionProvider = :fxProvider, updatedAt = :u",
             ExpressionAttributeNames: {
               "#s": "status",
             },
@@ -460,6 +482,10 @@ export default class PaymentsController {
               ":pmd": paymentMethodDetails,
               ":r": receiptUrl,
               ":fr": failureReason,
+              ":amountUsd": usdSnapshot.amountUsd,
+              ":rateUsd": usdSnapshot.exchangeRateToUsd,
+              ":rateDate": usdSnapshot.exchangeRateDate,
+              ":fxProvider": usdSnapshot.conversionProvider,
               ":u": nowISO(),
             },
           })

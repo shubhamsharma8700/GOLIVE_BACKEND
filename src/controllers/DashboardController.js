@@ -1,5 +1,6 @@
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ANALYTICS_TABLE, ddbDocClient } from "../config/awsClients.js";
+import { enrichPaymentsWithUsd } from "../utils/currency.js";
 
 const ANALYTICS_TABLE_NAME = ANALYTICS_TABLE;
 const ADMINS_TABLE = process.env.ADMIN_TABLE_NAME;
@@ -229,14 +230,12 @@ export const getDashboardAnalytics = async (req, res) => {
       return key === currentMonthKey ? count + 1 : count;
     }, 0);
 
-    let ytdRevenue = 0;
-    let previousYtdRevenue = 0;
+    const currentYtdPayments = [];
+    const previousYtdPayments = [];
     const currentMonthNum = now.getMonth() + 1;
 
     payments.forEach((payment) => {
       if (payment.status !== "succeeded") return;
-      const amount = toNumber(payment.amount);
-      if (!amount) return;
 
       const pDate = safeDate(payment.createdAt || payment.updatedAt);
       if (!pDate) return;
@@ -245,13 +244,28 @@ export const getDashboardAnalytics = async (req, res) => {
       const month = pDate.getMonth() + 1;
 
       if (year === currentYear && month <= currentMonthNum) {
-        ytdRevenue += amount;
+        currentYtdPayments.push(payment);
       }
 
       if (year === previousYear && month <= currentMonthNum) {
-        previousYtdRevenue += amount;
+        previousYtdPayments.push(payment);
       }
     });
+
+    const [currentYtdPaymentsUsd, previousYtdPaymentsUsd] = await Promise.all([
+      enrichPaymentsWithUsd(currentYtdPayments),
+      enrichPaymentsWithUsd(previousYtdPayments),
+    ]);
+
+    const ytdRevenue = currentYtdPaymentsUsd.reduce(
+      (sum, payment) => sum + toNumber(payment.amountUsd, 0),
+      0
+    );
+
+    const previousYtdRevenue = previousYtdPaymentsUsd.reduce(
+      (sum, payment) => sum + toNumber(payment.amountUsd, 0),
+      0
+    );
 
     const dashboardCards = [
       {
@@ -311,8 +325,8 @@ export const getDashboardAnalytics = async (req, res) => {
         return {
           eventId: event.eventId,
           title: event.title || "Untitled",
-          startTime: event.startTime || null,
-          endTime: event.endTime || null,
+          startTime: event.startTime || event.createdAt || null,
+          endTime: event.endTime || event.createdAt || null,
           status: event.status || event.vodStatus || "unknown",
           eventType: event.eventType || "unknown",
           thumbnailUrl:
@@ -362,6 +376,7 @@ export const getDashboardAnalytics = async (req, res) => {
         totalAdmins,
         ytdRevenue,
         previousYtdRevenue,
+        revenueCurrency: "USD",
       },
     });
   } catch (error) {
