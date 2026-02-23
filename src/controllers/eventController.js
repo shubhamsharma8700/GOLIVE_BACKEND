@@ -624,7 +624,7 @@ export default class EventController {
     }
   }
 
- // =====================================================
+  // =====================================================
   // DOWNLOAD ALL VOD RESOLUTIONS (MP4) USING PRESIGNED URL
   // =====================================================
   static async downloadVod(req, res) {
@@ -1019,7 +1019,7 @@ export default class EventController {
       // ==================================================
       if (existing.eventType === "scheduled") {
         // ---- startTime ----
-        if (payload.startTime) {
+        if (payload.startTime && existing.status !== "Ready for Live") {
           const newStart = toIsoString(payload.startTime);
           if (new Date(newStart) <= new Date()) {
             return res.status(400).json({
@@ -1070,16 +1070,24 @@ export default class EventController {
             ...payload.videoConfig,
           };
         }
-      } else {
+      }
+      else {
         // ------------------------------------------------
         // ❌ BLOCK time / videoConfig updates for LIVE/VOD
         // ------------------------------------------------
-        if (payload.startTime || payload.endTime || payload.videoConfig) {
-          return res.status(400).json({
-            message:
-              "startTime, endTime, and videoConfig can only be updated for scheduled events",
-          });
+        // if (payload.startTime || payload.endTime || payload.videoConfig) {
+        //   return res.status(400).json({
+        //     message:
+        //       "startTime, endTime, and videoConfig can only be updated for scheduled events",
+        //   });
+        // }
+        if (existing.eventType === "live") {
+          // ---- endTime ----
+          if (payload.endTime) {
+            updated.endTime = toIsoString(payload.endTime);
+          }
         }
+
       }
 
       // ==================================================
@@ -1403,6 +1411,25 @@ export default class EventController {
         return res.status(409).json({
           success: false,
           message: "Event deletion already in progress"
+        });
+      }
+
+      if (event?.eventType === "live" && event?.resourcesDeleted === true || event?.eventType === "scheduled" && event?.resourcesDeleted === true) {
+
+        /* ================= DELETE DB RECORD ================= */
+        await ddbDocClient.send(
+          new DeleteCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId }
+          })
+        );
+
+        // Return immediate response
+        res.status(202).json({
+          success: true,
+          message: "Event deleted successfully",
+          eventId,
+          status: "Deleted"
         });
       }
 
