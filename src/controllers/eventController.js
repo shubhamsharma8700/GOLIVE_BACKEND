@@ -915,8 +915,12 @@ export default class EventController {
   // =====================================================
   static async listEvents(req, res) {
     try {
-      let { q, type, limit = 20 } = req.query;
+      let { q, type, page = 1, limit = 20 } = req.query;
+      page = Number(page);
       limit = Number(limit);
+
+      if (!Number.isFinite(page) || page < 1) page = 1;
+      if (!Number.isFinite(limit) || limit < 1) limit = 20;
 
       const raw = await ddbDocClient.send(
         new ScanCommand({ TableName: EVENTS_TABLE })
@@ -943,10 +947,13 @@ export default class EventController {
         return bTime - aTime;
       });
 
+      const start = (page - 1) * limit;
+      const end = start + limit;
+
       return res.status(200).json({
         success: true,
         count: events.length,
-        events: events.slice(0, limit),
+        events: events.slice(start, end),
       });
     } catch (err) {
       console.error("List event error:", err);

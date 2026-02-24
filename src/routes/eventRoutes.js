@@ -283,6 +283,10 @@ router.post("/", requireAuth, EventController.createEvent);
  *         name: limit
  *         schema:
  *           type: number
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: number
  *     responses:
  *       200:
  *         description: List of events
