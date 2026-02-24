@@ -139,6 +139,57 @@ async function getEventViewerCount(eventId) {
   return total;
 }
 
+async function scanViewersByClientViewerId(clientViewerId, limit = null) {
+  const matched = [];
+  let lastEvaluatedKey;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: VIEWERS_TABLE,
+        FilterExpression: "clientViewerId = :v",
+        ExpressionAttributeValues: {
+          ":v": clientViewerId,
+        },
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+    );
+
+    if (result.Items?.length) {
+      matched.push(...result.Items);
+      if (limit && matched.length >= limit) {
+        return matched.slice(0, limit);
+      }
+    }
+
+    lastEvaluatedKey = result.LastEvaluatedKey;
+  } while (lastEvaluatedKey);
+
+  return matched;
+}
+
+async function findViewersByClientViewerId(clientViewerId, limit = null) {
+  const gsiResult = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: VIEWERS_TABLE,
+      IndexName: VIEWER_ID_INDEX,
+      KeyConditionExpression: "clientViewerId = :v",
+      ExpressionAttributeValues: {
+        ":v": clientViewerId,
+      },
+      ScanIndexForward: false,
+      ...(limit ? { Limit: limit } : {}),
+    })
+  );
+
+  if (gsiResult.Items?.length) {
+    return gsiResult.Items;
+  }
+
+  // Fallback for rows that do not contain the GSI sort key (lastActiveAt)
+  return scanViewersByClientViewerId(clientViewerId, limit);
+}
+
 /* =======================================================
    1. LIST ALL VIEWERS (ADMIN)
    GET /api/viewers
@@ -349,24 +400,14 @@ export async function getViewerById(req, res, next) {
       });
     }
 
-    const result = await ddbDocClient.send(
-      new QueryCommand({
-        TableName: VIEWERS_TABLE,
-        IndexName: VIEWER_ID_INDEX,
-        KeyConditionExpression: "clientViewerId = :v",
-        ExpressionAttributeValues: {
-          ":v": clientViewerId,
-        },
-        ScanIndexForward: false,
-      })
-    );
+    const items = await findViewersByClientViewerId(clientViewerId);
 
-    if (!result.Items || result.Items.length === 0) {
+    if (!items || items.length === 0) {
       return res.status(404).json({ error: "Viewer not found" });
     }
 
     const enriched = await Promise.all(
-      result.Items.map(async (v) => {
+      items.map(async (v) => {
         const eventRes = await ddbDocClient.send(
           new GetCommand({
             TableName: EVENTS_TABLE,
@@ -402,19 +443,8 @@ export async function deleteViewer(req, res, next) {
       return res.status(400).json({ error: "viewerID is required" });
     }
 
-    const lookup = await ddbDocClient.send(
-      new QueryCommand({
-        TableName: VIEWERS_TABLE,
-        IndexName: VIEWER_ID_INDEX,
-        KeyConditionExpression: "clientViewerId = :v",
-        ExpressionAttributeValues: {
-          ":v": clientViewerId,
-        },
-        Limit: 1,
-      })
-    );
-
-    const viewer = lookup.Items?.[0];
+    const viewers = await findViewersByClientViewerId(clientViewerId, 1);
+    const viewer = viewers?.[0];
     if (!viewer) {
       return res.status(404).json({ error: "Viewer not found" });
     }
