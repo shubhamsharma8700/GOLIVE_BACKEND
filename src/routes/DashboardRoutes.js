@@ -1,5 +1,6 @@
 import express from "express";
 import { getDashboardAnalytics } from "../controllers/DashboardController.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
@@ -16,10 +17,14 @@ const router = express.Router();
  *   get:
  *     summary: Get dashboard summary and analytics
  *     tags: [Dashboard]
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Dashboard analytics returned
+ *       401:
+ *         description: Unauthorized
  */
-router.get("/analytics", getDashboardAnalytics);
+router.get("/analytics", requireAuth, getDashboardAnalytics);
 
 export default router;
