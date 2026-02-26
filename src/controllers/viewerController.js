@@ -216,8 +216,10 @@ export async function listViewers(req, res, next) {
     let totalItems = 0;
     let lastEvaluatedKey = null;
 
+    /* ---------- SEARCH CASE ---------- */
     if (q) {
       const allViewers = await scanAllViewers(VIEWERS_TABLE);
+
       const filtered = allViewers.filter((v) => {
         const fields = [
           v?.name,
@@ -243,6 +245,7 @@ export async function listViewers(req, res, next) {
         lastEvaluatedKey = { offset: offset + limit };
       }
     } else {
+      /* ---------- NORMAL SCAN CASE ---------- */
       const params = {
         TableName: VIEWERS_TABLE,
         Limit: limit,
@@ -262,8 +265,11 @@ export async function listViewers(req, res, next) {
       lastEvaluatedKey = result.LastEvaluatedKey || null;
     }
 
+    /* ---------- NEW FILTER (REGISTRATION COMPLETE) ---------- */
+    viewers = viewers.filter((v) => v?.registrationComplete === true);
+
     /* ---------- FETCH EVENTS PER VIEWER ---------- */
-    const eventIds = [...new Set(viewers.map(v => v.eventId))];
+    const eventIds = [...new Set(viewers.map((v) => v.eventId))];
 
     const eventMap = {};
     await Promise.all(
@@ -283,19 +289,20 @@ export async function listViewers(req, res, next) {
     res.json({
       totalItems,
       count: viewers.length,
-      items: viewers.map(v => ({
+      items: viewers.map((v) => ({
         ...formatViewer(v),
         event: eventMap[v.eventId] || null,
       })),
       pagination: {
         limit,
         totalItems,
-        nextKey: lastEvaluatedKey?.eventId && lastEvaluatedKey?.clientViewerId
-          ? {
-            lastEventId: lastEvaluatedKey.eventId,
-            lastClientViewerId: lastEvaluatedKey.clientViewerId,
-          }
-          : null,
+        nextKey:
+          lastEvaluatedKey?.eventId && lastEvaluatedKey?.clientViewerId
+            ? {
+              lastEventId: lastEvaluatedKey.eventId,
+              lastClientViewerId: lastEvaluatedKey.clientViewerId,
+            }
+            : null,
         nextToken: encodePageToken(lastEvaluatedKey),
         hasMore: Boolean(lastEvaluatedKey),
       },

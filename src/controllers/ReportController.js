@@ -254,7 +254,7 @@ export const getAnalyticsByEventId = async (req, res) => {
     const rawEventId = req.body?.eventId;
     const eventId =
       typeof rawEventId === "string" &&
-      rawEventId.trim().toLowerCase() === "all"
+        rawEventId.trim().toLowerCase() === "all"
         ? null
         : rawEventId || null;
 
@@ -371,8 +371,8 @@ export const getAnalyticsByEventId = async (req, res) => {
           const viewer = viewerMap.get(buildCompositeViewerKey(eId, vId));
           const isRegistered = Boolean(
             viewer?.email ||
-              viewer?.name ||
-              (viewer?.formData && Object.keys(viewer.formData).length)
+            viewer?.name ||
+            (viewer?.formData && Object.keys(viewer.formData).length)
           );
 
           if (isRegistered) bucket.registered += 1;
@@ -491,7 +491,15 @@ export const getAnalyticsByEventId = async (req, res) => {
     ).length;
 
     const totalViews = analyticsItems.length;
-    const totalEvents = eventId ? (eventsMap[eventId] ? 1 : 0) : Object.keys(eventsMap).length;
+    // const totalEvents = eventId ? (eventsMap[eventId] ? 1 : 0) : Object.keys(eventsMap).length;
+    let totalEvents = 0;
+
+    if (eventId) {
+      totalEvents = eventsMap[eventId] ? 1 : 0;
+    } else {
+      const allEvents = await scanAllItems(EVENTS_TABLE);
+      totalEvents = allEvents.length;
+    }
 
     const avgViewers = totalEvents > 0 ? Math.round(totalViews / totalEvents) : 0;
     const avgWatchTimePerSession =
