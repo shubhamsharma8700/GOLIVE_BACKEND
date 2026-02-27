@@ -287,7 +287,7 @@ export async function listViewers(req, res, next) {
     );
 
     res.json({
-      totalItems,
+      totalItems:viewers.length,
       count: viewers.length,
       items: viewers.map((v) => ({
         ...formatViewer(v),

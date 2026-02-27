@@ -391,7 +391,10 @@ export default class PlaybackController {
       const accessMode = event.accessMode || "freeAccess";
       const requiresRegistrationData = REGISTRATION_REQUIRED_ACCESS_MODES.has(accessMode);
       const submittedEmail = safeString(email || formData?.email) || null;
-      const submittedName = safeString(name || `${formData?.firstName} ${formData?.lastName}`) || null;
+      // const submittedName = safeString(name || `${formData?.firstName} ${formData?.lastName}`) || null;
+      const submittedName = formData?.firstName
+        ? safeString(`${formData.firstName} ${formData?.lastName || ""}`.trim())
+        : null;
       const {
         registrationIdentityKey,
         normalizedEmail,
