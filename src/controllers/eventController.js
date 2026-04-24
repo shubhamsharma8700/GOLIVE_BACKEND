@@ -2,6 +2,7 @@ import {
   ddbDocClient,
   DeleteCommand,
   GetCommand,
+  lambda as lambdaClient,
   PutCommand,
   QueryCommand,
   ScanCommand,
@@ -37,6 +38,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { InvokeCommand } from "@aws-sdk/client-lambda";
 
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { v4 as uuidv4 } from "uuid";
@@ -53,6 +55,8 @@ const ANALYTICS_TABLE =
 const PAYMENTS_TABLE = process.env.PAYMENTS_TABLE || "go-live-payments";
 const VOD_BUCKET = process.env.S3_VOD_BUCKET || "go-live-vod";
 const SIGNED_URL_EXPIRES = Number(process.env.SIGNED_URL_EXPIRES || 900);
+const TRIMMER_LAMBDA_ARN = process.env.TRIMMER_LAMBDA_ARN;
+console.log("Config - TRIMMER_LAMBDA_ARN:", TRIMMER_LAMBDA_ARN);
 
 const EVENT_TYPES = new Set(["live", "scheduled", "vod"]);
 const ACCESS_MODES = new Set([
@@ -82,6 +86,12 @@ const mediaPackageClient = new MediaPackageClient({ region });
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const nowISO = () => new Date().toISOString();
+
+const buildTrimSegmentFolder = (value = new Date().toISOString()) => {
+  const iso = new Date(value).toISOString();
+  const compact = iso.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return `segment_${compact.replace("T", "_").replace("Z", "")}`;
+};
 
 const toIsoString = (value) => {
   if (!value) return null;
@@ -540,6 +550,10 @@ async function performAsyncDeletion(eventId, event) {
       }
     }
 
+    if (event?.TrimDetails?.length || event?.trimOutputPath) {
+      await deleteS3Prefix(VOD_BUCKET, `trimmed/${eventId}`);
+    }
+
     const cascadeDeletionSummary =
       await deleteRelatedDbRecordsForEvent(eventId);
     console.log(
@@ -704,6 +718,211 @@ export default class EventController {
         success: false,
         message: "Failed to generate download URLs",
         error: error.message,
+      });
+    }
+  }
+
+  // =====================================================
+  // START TRIM JOB FOR LIVE RECORDING
+  // =====================================================
+  static async trimRecording(req, res) {
+    try {
+      const { eventId } = req.params;
+      const {
+        startTime,
+        endTime,
+        outputName,
+      } = req.body || {};
+
+      if (!eventId) {
+        return res.status(400).json({
+          success: false,
+          message: "eventId is required",
+        });
+      }
+
+      if (startTime === undefined || startTime === null || startTime === "") {
+        return res.status(400).json({
+          success: false,
+          message: "startTime is required",
+        });
+      }
+
+      if (endTime === undefined || endTime === null || endTime === "") {
+        return res.status(400).json({
+          success: false,
+          message: "endTime is required",
+        });
+      }
+
+      if (!TRIMMER_LAMBDA_ARN) {
+        return res.status(500).json({
+          success: false,
+          message: "TRIMMER_LAMBDA_ARN is not configured",
+        });
+      }
+
+      const { Item: event } = await ddbDocClient.send(
+        new GetCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+        })
+      );
+
+      if (!event) {
+        return res.status(404).json({
+          success: false,
+          message: "Event not found",
+        });
+      }
+
+      if (!event.s3RecordingBucket || !event.s3RecordingManifestKey) {
+        return res.status(400).json({
+          success: false,
+          message: "Recording manifest not found for this event",
+        });
+      }
+
+      const sanitizedOutputName =
+        typeof outputName === "string" && outputName.trim()
+          ? outputName.trim()
+          : "trimmed-clip";
+
+      const trimRequestId = uuidv4();
+      const requestedAt = nowISO();
+      const trimFolderName = buildTrimSegmentFolder(requestedAt);
+      const trimOutputPath = `trimmed/${eventId}/${trimFolderName}`;
+      const requestedBy =
+        req.user?.email ||
+        req.user?.id ||
+        req.user?.sub ||
+        req.user?.adminId ||
+        "system";
+
+      await ddbDocClient.send(
+        new UpdateCommand({
+          TableName: EVENTS_TABLE,
+          Key: { eventId },
+          UpdateExpression:
+            "SET trimStatus = :status, " +
+            "trimRequestId = :trimRequestId, " +
+            "trimRequestedAt = :requestedAt, " +
+            "trimRequestedBy = :requestedBy, " +
+            "trimStartTime = :startTime, " +
+            "trimEndTime = :endTime, " +
+            "trimOutputName = :outputName, " +
+            "trimFolderName = :trimFolderName, " +
+            "trimOutputPath = :outputPath, " +
+            "TrimDetails = list_append(if_not_exists(TrimDetails, :emptyList), :newTrimDetail), " +
+            "updatedAt = :updatedAt",
+          ExpressionAttributeValues: {
+            ":status": "REQUESTED",
+            ":trimRequestId": trimRequestId,
+            ":requestedAt": requestedAt,
+            ":requestedBy": requestedBy,
+            ":startTime": String(startTime),
+            ":endTime": String(endTime),
+            ":outputName": sanitizedOutputName,
+            ":trimFolderName": trimFolderName,
+            ":outputPath": trimOutputPath,
+            ":emptyList": [],
+            ":newTrimDetail": [
+              {
+                trimRequestId,
+                status: "REQUESTED",
+                requestedAt,
+                requestedBy,
+                startTime: String(startTime),
+                endTime: String(endTime),
+                outputName: sanitizedOutputName,
+                trimFolderName,
+                trimOutputPath,
+              },
+            ],
+            ":updatedAt": requestedAt,
+          },
+        })
+      );
+
+      try {
+        await lambdaClient.send(
+          new InvokeCommand({
+            FunctionName: TRIMMER_LAMBDA_ARN,
+            InvocationType: "Event",
+            Payload: Buffer.from(
+              JSON.stringify({
+                eventId,
+                trimRequestId,
+                trimFolderName,
+                trimOutputPath,
+                startTime,
+                endTime,
+                outputName: sanitizedOutputName,
+                requestedBy,
+                requestedAt,
+              })
+            ),
+          })
+        );
+      } catch (invokeError) {
+        const latestEvent = await ddbDocClient.send(
+          new GetCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId },
+          })
+        );
+
+        const trimDetails = Array.isArray(latestEvent.Item?.TrimDetails)
+          ? latestEvent.Item.TrimDetails.map((detail) =>
+            detail?.trimRequestId === trimRequestId
+              ? {
+                ...detail,
+                status: "FAILED",
+                error: invokeError.message || "Failed to invoke trim lambda",
+                errorAt: nowISO(),
+              }
+              : detail
+          )
+          : [];
+
+        await ddbDocClient.send(
+          new UpdateCommand({
+            TableName: EVENTS_TABLE,
+            Key: { eventId },
+            UpdateExpression:
+              "SET trimStatus = :status, trimError = :error, trimErrorTime = :errorTime, TrimDetails = :trimDetails, updatedAt = :updatedAt",
+            ExpressionAttributeValues: {
+              ":status": "FAILED",
+              ":error": invokeError.message || "Failed to invoke trim lambda",
+              ":errorTime": nowISO(),
+              ":trimDetails": trimDetails,
+              ":updatedAt": nowISO(),
+            },
+          })
+        );
+
+        throw invokeError;
+      }
+
+      return res.status(202).json({
+        success: true,
+        message: "Trim job requested successfully",
+        data: {
+          eventId,
+          trimRequestId,
+          trimStatus: "REQUESTED",
+          startTime: String(startTime),
+          endTime: String(endTime),
+          outputName: sanitizedOutputName,
+          trimFolderName,
+          outputPath: `${trimOutputPath}/`,
+        },
+      });
+    } catch (error) {
+      console.error("Trim request error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to request trim job",
       });
     }
   }

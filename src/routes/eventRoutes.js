@@ -164,6 +164,12 @@ const router = express.Router();
  *           type: string
  *         vodStatus:
  *           type: string
+ *         trimStatus:
+ *           type: string
+ *         trimCloudFrontUrl:
+ *           type: string
+ *         trimMp4CloudFrontUrl:
+ *           type: string
  *
  *         # Config
  *         videoConfig:
@@ -229,6 +235,50 @@ router.get("/vod/presign", requireAuth, EventController.vodPresignUpload);
  *         description: Presigned download URL returned
  */
 router.get("/vod/download/:eventId", EventController.downloadVod);
+
+/* ============================================================
+   START TRIM JOB FOR LIVE RECORDING
+   ============================================================ */
+/**
+ * @swagger
+ * /api/events/{eventId}/trim:
+ *   post:
+ *     summary: Start a trim job for the recorded live stream
+ *     tags: [Events]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: eventId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - startTime
+ *               - endTime
+ *             properties:
+ *               startTime:
+ *                 type: string
+ *                 description: Clip start offset. Accepts seconds or HH:MM:SS
+ *                 example: "00:00:30"
+ *               endTime:
+ *                 type: string
+ *                 description: Clip end offset. Accepts seconds or HH:MM:SS
+ *                 example: "00:02:00"
+ *               outputName:
+ *                 type: string
+ *                 example: "speaker-highlight"
+ *     responses:
+ *       202:
+ *         description: Trim job accepted
+ */
+router.post("/:eventId/trim", requireAuth, EventController.trimRecording);
 
 /* ============================================================
    2. CREATE EVENT
